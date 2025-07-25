@@ -470,6 +470,20 @@ impl ChatComposer<'_> {
 
     /// Handle generic Input events that modify the textarea content.
     fn handle_input_basic(&mut self, input: Input) -> (InputResult, bool) {
+        // Clear the entire input on Ctrl+U
+        if let Input {
+            key: Key::Char('u'),
+            ctrl: true,
+            alt: false,
+            shift: false,
+        } = input
+        {
+            self.textarea.select_all();
+            self.textarea.cut();
+            self.pending_pastes.clear();
+            return (InputResult::None, true);
+        }
+
         // Special handling for backspace on placeholders
         if let Input {
             key: Key::Backspace,
@@ -1169,5 +1183,31 @@ mod tests {
                 (false, 0), // After deleting from end
             ]
         );
+    }
+
+    #[test]
+    fn test_ctrl_u_clears_all_input() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(true, sender);
+
+        // Paste a large chunk to create a placeholder and a small chunk
+        let large = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 1);
+        let small = " hello".to_string();
+        composer.handle_paste(large);
+        composer.handle_paste(small);
+
+        assert!(!composer.textarea.is_empty());
+        assert!(composer.pending_pastes.len() >= 1);
+
+        // Send Ctrl+U
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+
+        assert!(composer.textarea.is_empty());
+        assert!(composer.pending_pastes.is_empty());
     }
 }
