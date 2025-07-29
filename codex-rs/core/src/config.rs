@@ -465,9 +465,9 @@ impl Config {
 
         let experimental_resume = cfg.experimental_resume;
 
-        let base_instructions = base_instructions.or(Self::get_base_instructions(
+        let base_instructions = base_instructions.or(Self::load_instructions_file(
             cfg.experimental_instructions_file.as_ref(),
-        ));
+        )?);
 
         let config = Self {
             model,
@@ -539,13 +539,19 @@ impl Config {
         })
     }
 
-    fn get_base_instructions(path: Option<&PathBuf>) -> Option<String> {
-        let path = path.as_ref()?;
-
-        std::fs::read_to_string(path)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+    fn load_instructions_file(path: Option<&PathBuf>) -> Result<Option<String>, std::io::Error> {
+        if let Some(path) = path {
+            let contents = std::fs::read_to_string(path).map_err(|e| {
+                std::io::Error::other(format!("Error reading instructions file {path:?}: {e:?}"))
+            })?;
+            let trimmed = contents.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(trimmed.to_string()))
+        } else {
+            Ok(None)
+        }
     }
 }
 
