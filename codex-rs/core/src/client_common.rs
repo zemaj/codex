@@ -106,6 +106,10 @@ impl Prompt {
             .map(|ui| format!("{USER_INSTRUCTIONS_START}{ui}{USER_INSTRUCTIONS_END}"))
     }
 
+    fn input_has_user_instructions(&self) -> bool {
+        has_user_instructions(&self.input)
+    }
+
     fn get_formatted_environment_context(&self) -> Option<String> {
         self.environment_context
             .as_ref()
@@ -114,6 +118,15 @@ impl Prompt {
 
     pub(crate) fn get_formatted_input(&self) -> Vec<ResponseItem> {
         let mut input_with_instructions = Vec::with_capacity(self.input.len() + 2);
+        if let Some(ui) = self.get_formatted_user_instructions() {
+            if !self.input_has_user_instructions() {
+                input_with_instructions.push(ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText { text: ui }],
+                });
+            }
+        }
         if let Some(ec) = self.get_formatted_environment_context() {
             input_with_instructions.push(ResponseItem::Message {
                 id: None,
@@ -121,15 +134,24 @@ impl Prompt {
                 content: vec![ContentItem::InputText { text: ec }],
             });
         }
-        if let Some(ui) = self.get_formatted_user_instructions() {
-            input_with_instructions.push(ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText { text: ui }],
-            });
-        }
         input_with_instructions.extend(self.input.clone());
         input_with_instructions
+    }
+}
+
+pub(crate) fn has_user_instructions(input: &[ResponseItem]) -> bool {
+    input.iter().any(is_user_instruction_item)
+}
+
+fn is_user_instruction_item(item: &ResponseItem) -> bool {
+    match item {
+        ResponseItem::Message { content, .. } => content.iter().any(|c| match c {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                text.starts_with(USER_INSTRUCTIONS_START) && text.ends_with(USER_INSTRUCTIONS_END)
+            }
+            _ => false,
+        }),
+        _ => false,
     }
 }
 
@@ -263,5 +285,64 @@ mod tests {
         let model_family = find_family_for_model("gpt-4.1").expect("known model slug");
         let full = prompt.get_full_instructions(&model_family);
         assert_eq!(full, expected);
+    }
+
+    #[test]
+    fn test_get_formatted_input() {
+        let ui_text = format!("{USER_INSTRUCTIONS_START}custom{USER_INSTRUCTIONS_END}");
+        let user_message = ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "user query".to_string(),
+            }],
+        };
+        let prompt = Prompt {
+            input: vec![user_message.clone()],
+            user_instructions: Some("custom".to_string()),
+            ..Default::default()
+        };
+
+        let formatted = prompt.get_formatted_input();
+        assert_eq!(
+            formatted,
+            vec![
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: ui_text.clone(),
+                    }],
+                },
+                user_message,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_get_formatted_input_avoids_duplicate_user_instructions() {
+        let ui_text = format!("{USER_INSTRUCTIONS_START}custom{USER_INSTRUCTIONS_END}");
+        let user_instructions = ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: ui_text.clone(),
+            }],
+        };
+        let user_message = ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "user query".to_string(),
+            }],
+        };
+        let prompt = Prompt {
+            input: vec![user_instructions.clone(), user_message.clone()],
+            user_instructions: Some("custom 2".to_string()),
+            ..Default::default()
+        };
+
+        let formatted = prompt.get_formatted_input();
+        assert_eq!(formatted, vec![user_instructions, user_message,]);
     }
 }
