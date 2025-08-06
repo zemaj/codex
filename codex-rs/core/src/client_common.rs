@@ -147,7 +147,9 @@ fn is_user_instruction_item(item: &ResponseItem) -> bool {
     match item {
         ResponseItem::Message { content, .. } => content.iter().any(|c| match c {
             ContentItem::InputText { text } | ContentItem::OutputText { text } => {
-                text.starts_with(USER_INSTRUCTIONS_START) && text.ends_with(USER_INSTRUCTIONS_END)
+                let trimmed = text.trim();
+                trimmed.starts_with(USER_INSTRUCTIONS_START)
+                    && trimmed.ends_with(USER_INSTRUCTIONS_END)
             }
             _ => false,
         }),
