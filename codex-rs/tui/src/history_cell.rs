@@ -705,9 +705,10 @@ impl HistoryCell {
                         Span::styled("✔", Style::default().fg(Color::Green)),
                         Span::styled(
                             step,
+                            // Keep crossed-out, but drop DIM so it's readable
                             Style::default()
                                 .fg(Color::Gray)
-                                .add_modifier(Modifier::CROSSED_OUT | Modifier::DIM),
+                                .add_modifier(Modifier::CROSSED_OUT),
                         ),
                     ),
                     StepStatus::InProgress => (
@@ -721,10 +722,8 @@ impl HistoryCell {
                     ),
                     StepStatus::Pending => (
                         Span::raw("□"),
-                        Span::styled(
-                            step,
-                            Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
-                        ),
+                        // Use plain Gray (no DIM) to improve contrast on dark themes
+                        Span::styled(step, Style::default().fg(Color::Gray)),
                     ),
                 };
                 let prefix = if idx == 0 {
@@ -796,6 +795,33 @@ impl HistoryCell {
 
         if !stderr.trim().is_empty() {
             let mut iter = stderr.lines();
+            for (i, raw) in iter.by_ref().take(TOOL_CALL_MAX_LINES).enumerate() {
+                let prefix = if i == 0 { "  ⎿ " } else { "    " };
+                let s = format!("{prefix}{raw}");
+                lines.push(ansi_escape_line(&s).dim());
+            }
+            let remaining = iter.count();
+            if remaining > 0 {
+                lines.push(Line::from(""));
+                lines.push(Line::from(format!("... +{remaining} lines")).dim());
+            }
+        }
+
+        lines.push(Line::from(""));
+
+        HistoryCell::PatchApplyResult {
+            view: TextBlock::new(lines),
+        }
+    }
+
+    pub(crate) fn new_patch_apply_success(stdout: String) -> Self {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        // Success title
+        lines.push(Line::from("✓ Applied patch".magenta().bold()));
+
+        if !stdout.trim().is_empty() {
+            let mut iter = stdout.lines();
             for (i, raw) in iter.by_ref().take(TOOL_CALL_MAX_LINES).enumerate() {
                 let prefix = if i == 0 { "  ⎿ " } else { "    " };
                 let s = format!("{prefix}{raw}");

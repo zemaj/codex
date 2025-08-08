@@ -274,7 +274,7 @@ impl ChatWidget<'_> {
             ev.duration,
             ev.result
                 .as_ref()
-                .map(|r| r.is_error.unwrap_or(false))
+                .map(|r| !r.is_error.unwrap_or(false))
                 .unwrap_or(false),
             ev.result,
         ));
@@ -591,7 +591,9 @@ impl ChatWidget<'_> {
                 ));
             }
             EventMsg::PatchApplyEnd(event) => {
-                if !event.success {
+                 if event.success {
+                     self.add_to_history(HistoryCell::new_patch_apply_success(event.stdout));
+                 } else {
                     self.add_to_history(HistoryCell::new_patch_apply_failure(event.stderr));
                 }
             }
@@ -907,18 +909,20 @@ mod chatwidget_helper_tests {
     use super::*;
     use crate::app_event::AppEvent;
     use crate::app_event_sender::AppEventSender;
-    use codex_core::config::ConfigOverrides;
+    use codex_core::config::{ConfigOverrides, ConfigToml};
+    use codex_core::protocol::{ApplyPatchApprovalRequestEvent, FileChange, PatchApplyBeginEvent, PatchApplyEndEvent};
+    use codex_core::plan_tool::{UpdatePlanArgs, PlanItemArg, StepStatus};
     use std::sync::mpsc::channel;
+    use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
 
     fn test_config() -> Config {
-        let overrides = ConfigOverrides {
-            cwd: std::env::current_dir().ok(),
-            ..Default::default()
-        };
-        match Config::load_with_cli_overrides(vec![], overrides) {
-            Ok(c) => c,
-            Err(e) => panic!("load test config: {e}"),
-        }
+        // Use base defaults to avoid depending on host state.
+        codex_core::config::Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            ConfigOverrides::default(),
+            std::env::temp_dir(),
+        )
+        .expect("config")
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -930,5 +934,317 @@ mod chatwidget_helper_tests {
 
         // Adjust the live ring capacity (no-op for rendering) and ensure no panic.
         w.test_set_live_max_rows(4);
+    }
+
+    // --- Helpers for tests that need direct construction and event draining ---
+    fn make_chatwidget_manual() -> (
+        ChatWidget<'static>,
+        std::sync::mpsc::Receiver<AppEvent>,
+        tokio::sync::mpsc::UnboundedReceiver<Op>,
+    ) {
+        let (tx_raw, rx) = channel::<AppEvent>();
+        let app_event_tx = AppEventSender::new(tx_raw);
+        let (op_tx, op_rx) = unbounded_channel::<Op>();
+        let cfg = test_config();
+        let bottom = BottomPane::new(BottomPaneParams {
+            app_event_tx: app_event_tx.clone(),
+            has_input_focus: true,
+            enhanced_keys_supported: false,
+        });
+        let widget = ChatWidget {
+            app_event_tx,
+            codex_op_tx: op_tx,
+            bottom_pane: bottom,
+            active_history_cell: None,
+            config: cfg,
+            initial_user_message: None,
+            total_token_usage: TokenUsage::default(),
+            last_token_usage: TokenUsage::default(),
+            reasoning_collector: MarkdownNewlineCollector::new(),
+            answer_collector: MarkdownNewlineCollector::new(),
+            reasoning_streamer: RenderedLineStreamer::new(),
+            answer_streamer: RenderedLineStreamer::new(),
+            running_commands: HashMap::new(),
+            current_stream: None,
+            answer_header_emitted: false,
+            reasoning_header_emitted: false,
+            live_max_rows: 3,
+            task_complete_pending: false,
+            finishing_after_drain: false,
+            interrupt_queue: VecDeque::new(),
+        };
+        (widget, rx, op_rx)
+    }
+
+    fn drain_insert_history(
+        rx: &std::sync::mpsc::Receiver<AppEvent>,
+    ) -> Vec<Vec<ratatui::text::Line<'static>>> {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::InsertHistory(lines) = ev {
+                out.push(lines);
+            }
+        }
+        out
+    }
+
+    fn lines_to_single_string(lines: &[ratatui::text::Line<'static>]) -> String {
+        let mut s = String::new();
+        for line in lines {
+            for span in &line.spans {
+                s.push_str(&span.content);
+            }
+            s.push('\n');
+        }
+        s
+    }
+
+    #[test]
+    fn apply_patch_events_emit_history_cells() {
+        let (mut chat, rx, _op_rx) = make_chatwidget_manual();
+
+        // 1) Approval request -> proposed patch summary cell
+        let mut changes = HashMap::new();
+        changes.insert(
+            PathBuf::from("foo.txt"),
+            FileChange::Add {
+                content: "hello\n".to_string(),
+            },
+        );
+        let ev = ApplyPatchApprovalRequestEvent {
+            call_id: "c1".into(),
+            changes,
+            reason: None,
+            grant_root: None,
+        };
+        chat.handle_codex_event(Event {
+            id: "s1".into(),
+            msg: EventMsg::ApplyPatchApprovalRequest(ev),
+        });
+        let cells = drain_insert_history(&rx);
+        assert!(!cells.is_empty(), "expected pending patch cell to be sent");
+        let blob = lines_to_single_string(&cells.last().unwrap());
+        assert!(
+            blob.contains("proposed patch"),
+            "missing proposed patch header: {blob:?}"
+        );
+
+        // 2) Begin apply -> applying patch cell
+        let mut changes2 = HashMap::new();
+        changes2.insert(
+            PathBuf::from("foo.txt"),
+            FileChange::Add {
+                content: "hello\n".to_string(),
+            },
+        );
+        let begin = PatchApplyBeginEvent {
+            call_id: "c1".into(),
+            auto_approved: true,
+            changes: changes2,
+        };
+        chat.handle_codex_event(Event {
+            id: "s1".into(),
+            msg: EventMsg::PatchApplyBegin(begin),
+        });
+        let cells = drain_insert_history(&rx);
+        assert!(!cells.is_empty(), "expected applying patch cell to be sent");
+        let blob = lines_to_single_string(&cells.last().unwrap());
+        assert!(
+            blob.contains("Applying patch"),
+            "missing applying patch header: {blob:?}"
+        );
+
+        // 3) End apply success -> success cell
+        let end = PatchApplyEndEvent {
+            call_id: "c1".into(),
+            stdout: "ok\n".into(),
+            stderr: String::new(),
+            success: true,
+        };
+        chat.handle_codex_event(Event {
+            id: "s1".into(),
+            msg: EventMsg::PatchApplyEnd(end),
+        });
+        let cells = drain_insert_history(&rx);
+        assert!(!cells.is_empty(), "expected applied patch cell to be sent");
+        let blob = lines_to_single_string(&cells.last().unwrap());
+        assert!(
+            blob.contains("Applied patch"),
+            "missing applied patch header: {blob:?}"
+        );
+    }
+
+    #[test]
+    fn apply_patch_approval_sends_op_with_submission_id() {
+        let (mut chat, rx, _op_rx) = make_chatwidget_manual();
+        // Simulate receiving an approval request with a distinct submission id and call id
+        let mut changes = HashMap::new();
+        changes.insert(
+            PathBuf::from("file.rs"),
+            FileChange::Add {
+                content: "fn main(){}\n".into(),
+            },
+        );
+        let ev = ApplyPatchApprovalRequestEvent {
+            call_id: "call-999".into(),
+            changes,
+            reason: None,
+            grant_root: None,
+        };
+        chat.handle_codex_event(Event {
+            id: "sub-123".into(),
+            msg: EventMsg::ApplyPatchApprovalRequest(ev),
+        });
+
+        // Approve via key press 'y'
+        chat.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+        // Expect a CodexOp with PatchApproval carrying the submission id, not call id
+        let mut found = false;
+        while let Ok(app_ev) = rx.try_recv() {
+            if let AppEvent::CodexOp(op) = app_ev {
+                if let Op::PatchApproval { id, decision } = op {
+                    assert_eq!(id, "sub-123");
+                    assert!(matches!(
+                        decision,
+                        codex_core::protocol::ReviewDecision::Approved
+                    ));
+                    found = true;
+                    break;
+                }
+            }
+        }
+        assert!(found, "expected PatchApproval op to be sent");
+    }
+
+    #[test]
+    fn apply_patch_full_flow_integration_like() {
+        let (mut chat, rx, mut op_rx) = make_chatwidget_manual();
+
+        // 1) Backend requests approval
+        let mut changes = HashMap::new();
+        changes.insert(
+            PathBuf::from("pkg.rs"),
+            FileChange::Add { content: "".into() },
+        );
+        chat.handle_codex_event(Event {
+            id: "sub-xyz".into(),
+            msg: EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
+                call_id: "call-1".into(),
+                changes,
+                reason: None,
+                grant_root: None,
+            }),
+        });
+
+        // 2) User approves via 'y' and App receives a CodexOp
+        chat.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        let mut maybe_op: Option<Op> = None;
+        while let Ok(app_ev) = rx.try_recv() {
+            if let AppEvent::CodexOp(op) = app_ev {
+                maybe_op = Some(op);
+                break;
+            }
+        }
+        let op = maybe_op.expect("expected CodexOp after key press");
+
+        // 3) App forwards to widget.submit_op, which pushes onto codex_op_tx
+        chat.submit_op(op);
+        let forwarded = op_rx
+            .try_recv()
+            .expect("expected op forwarded to codex channel");
+        match forwarded {
+            Op::PatchApproval { id, decision } => {
+                assert_eq!(id, "sub-xyz");
+                assert!(matches!(
+                    decision,
+                    codex_core::protocol::ReviewDecision::Approved
+                ));
+            }
+            other => panic!("unexpected op forwarded: {other:?}"),
+        }
+
+        // 4) Simulate patch begin/end events from backend; ensure history cells are emitted
+        let mut changes2 = HashMap::new();
+        changes2.insert(PathBuf::from("pkg.rs"), FileChange::Add { content: "".into() });
+        chat.handle_codex_event(Event {
+            id: "sub-xyz".into(),
+            msg: EventMsg::PatchApplyBegin(PatchApplyBeginEvent {
+                call_id: "call-1".into(),
+                auto_approved: false,
+                changes: changes2,
+            }),
+        });
+        chat.handle_codex_event(Event {
+            id: "sub-xyz".into(),
+            msg: EventMsg::PatchApplyEnd(PatchApplyEndEvent {
+                call_id: "call-1".into(),
+                stdout: String::from("ok"),
+                stderr: String::new(),
+                success: true,
+            }),
+        });
+    }
+
+    #[test]
+    fn apply_patch_untrusted_shows_approval_modal() {
+        let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
+        // Ensure approval policy is untrusted (OnRequest)
+        chat.config.approval_policy = codex_core::protocol::AskForApproval::OnRequest;
+
+        // Simulate a patch approval request from backend
+        let mut changes = HashMap::new();
+        changes.insert(PathBuf::from("a.rs"), FileChange::Add { content: "".into() });
+        chat.handle_codex_event(Event {
+            id: "sub-1".into(),
+            msg: EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
+                call_id: "call-1".into(),
+                changes,
+                reason: None,
+                grant_root: None,
+            }),
+        });
+
+        // Render and ensure the approval modal title is present
+        let area = ratatui::layout::Rect::new(0, 0, 80, 12);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        (&chat).render_ref(area, &mut buf);
+
+        let mut contains_title = false;
+        for y in 0..area.height {
+            let mut row = String::new();
+            for x in 0..area.width {
+                row.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+            }
+            if row.contains("Apply changes?") {
+                contains_title = true;
+                break;
+            }
+        }
+        assert!(
+            contains_title,
+            "expected approval modal to be visible with title 'Apply changes?'"
+        );
+    }
+
+    #[test]
+    fn plan_update_renders_history_cell() {
+        let (mut chat, rx, _op_rx) = make_chatwidget_manual();
+        let update = UpdatePlanArgs {
+            explanation: Some("Adapting plan".to_string()),
+            plan: vec![
+                PlanItemArg { step: "Explore codebase".into(), status: StepStatus::Completed },
+                PlanItemArg { step: "Implement feature".into(), status: StepStatus::InProgress },
+                PlanItemArg { step: "Write tests".into(), status: StepStatus::Pending },
+            ],
+        };
+        chat.handle_codex_event(Event { id: "sub-1".into(), msg: EventMsg::PlanUpdate(update) });
+        let cells = drain_insert_history(&rx);
+        assert!(!cells.is_empty(), "expected plan update cell to be sent");
+        let blob = lines_to_single_string(&cells.last().unwrap());
+        assert!(blob.contains("Updated"), "missing plan header: {blob:?}");
+        assert!(blob.contains("Explore codebase"));
+        assert!(blob.contains("Implement feature"));
+        assert!(blob.contains("Write tests"));
     }
 }
