@@ -818,7 +818,20 @@ impl ChatWidget<'_> {
             // Ensure the waiting status is visible (composer replaced).
             self.bottom_pane
                 .update_status_text("waiting for model".to_string());
-            // No live ring overlay; headers will be inserted with the first commit.
+             // Emit a header immediately so the user sees which stream is active
+             // even before the first newline-gated commit occurs.
+             let need_header = match kind {
+                 StreamKind::Reasoning => !self.reasoning_header_emitted,
+                 StreamKind::Answer => !self.answer_header_emitted,
+             };
+             if need_header {
+                 self.app_event_tx
+                     .send(AppEvent::InsertHistory(vec![Self::header_line(kind)]));
+                 match kind {
+                     StreamKind::Reasoning => self.reasoning_header_emitted = true,
+                     StreamKind::Answer => self.answer_header_emitted = true,
+                 }
+             }
         }
     }
 
@@ -912,6 +925,7 @@ mod chatwidget_helper_tests {
     use codex_core::config::{ConfigOverrides, ConfigToml};
     use codex_core::protocol::{ApplyPatchApprovalRequestEvent, FileChange, PatchApplyBeginEvent, PatchApplyEndEvent};
     use codex_core::plan_tool::{UpdatePlanArgs, PlanItemArg, StepStatus};
+    use codex_core::protocol::{AgentMessageDeltaEvent, AgentReasoningDeltaEvent};
     use std::sync::mpsc::channel;
     use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
 
@@ -1228,6 +1242,53 @@ mod chatwidget_helper_tests {
     }
 
     #[test]
+    fn apply_patch_request_shows_diff_summary() {
+        let (mut chat, rx, _op_rx) = make_chatwidget_manual();
+
+        // Ensure we are in OnRequest so an approval is surfaced
+        chat.config.approval_policy = codex_core::protocol::AskForApproval::OnRequest;
+
+        // Simulate backend asking to apply a patch adding two lines to README.md
+        let mut changes = HashMap::new();
+        changes.insert(
+            PathBuf::from("README.md"),
+            FileChange::Add {
+                // Two lines (no trailing empty line counted)
+                content: "line one\nline two\n".into(),
+            },
+        );
+        chat.handle_codex_event(Event {
+            id: "sub-apply".into(),
+            msg: EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
+                call_id: "call-apply".into(),
+                changes,
+                reason: None,
+                grant_root: None,
+            }),
+        });
+
+        // Drain history insertions and verify the diff summary is present
+        let cells = drain_insert_history(&rx);
+        assert!(
+            !cells.is_empty(),
+            "expected a history cell with the proposed patch summary"
+        );
+        let blob = lines_to_single_string(cells.last().unwrap());
+
+        // Header should summarize totals
+        assert!(
+            blob.contains("proposed patch to 1 file (+2 -0)"),
+            "missing or incorrect diff header: {blob:?}"
+        );
+
+        // Per-file summary line should include the file path and counts
+        assert!(
+            blob.contains("README.md (+2 -0)"),
+            "missing per-file diff summary: {blob:?}"
+        );
+    }
+
+    #[test]
     fn plan_update_renders_history_cell() {
         let (mut chat, rx, _op_rx) = make_chatwidget_manual();
         let update = UpdatePlanArgs {
@@ -1246,5 +1307,39 @@ mod chatwidget_helper_tests {
         assert!(blob.contains("Explore codebase"));
         assert!(blob.contains("Implement feature"));
         assert!(blob.contains("Write tests"));
+    }
+
+    #[test]
+    fn headers_emitted_on_stream_begin_for_answer_and_reasoning() {
+        let (mut chat, rx, _op_rx) = make_chatwidget_manual();
+
+        // Simulate an assistant message delta without newline – should still emit header immediately.
+        chat.handle_codex_event(Event {
+            id: "sub-a".into(),
+            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta: "Hello".into() }),
+        });
+        let mut saw_codex = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::InsertHistory(lines) = ev {
+                let s = lines.iter().flat_map(|l| l.spans.iter()).map(|sp| sp.content.clone()).collect::<Vec<_>>().join("");
+                if s.contains("codex") { saw_codex = true; break; }
+            }
+        }
+        assert!(saw_codex, "expected 'codex' header to be emitted at stream start");
+
+        // Simulate a reasoning delta – should emit 'thinking' header immediately.
+        let (mut chat2, rx2, _op_rx2) = make_chatwidget_manual();
+        chat2.handle_codex_event(Event {
+            id: "sub-b".into(),
+            msg: EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta: "Thinking".into() }),
+        });
+        let mut saw_thinking = false;
+        while let Ok(ev) = rx2.try_recv() {
+            if let AppEvent::InsertHistory(lines) = ev {
+                let s = lines.iter().flat_map(|l| l.spans.iter()).map(|sp| sp.content.clone()).collect::<Vec<_>>().join("");
+                if s.contains("thinking") { saw_thinking = true; break; }
+            }
+        }
+        assert!(saw_thinking, "expected 'thinking' header to be emitted at stream start");
     }
 }
