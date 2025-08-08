@@ -399,6 +399,152 @@ async fn includes_user_instructions_message_in_request() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prefixes_context_and_instructions_once_and_consistently_across_requests() {
+    #![allow(clippy::unwrap_used)]
+
+    // Mock server that will accept two requests
+    let server = MockServer::start().await;
+
+    let sse = sse_completed("resp");
+    let template = ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_raw(sse, "text/event-stream");
+
+    // Expect two POSTs to /v1/responses
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(template)
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let model_provider = ModelProviderInfo {
+        base_url: Some(format!("{}/v1", server.uri())),
+        ..built_in_model_providers()["openai"].clone()
+    };
+
+    // Init session with explicit user_instructions to validate consistency
+    let codex_home = TempDir::new().unwrap();
+    let mut config = load_default_config_for_test(&codex_home);
+    config.model_provider = model_provider;
+    config.user_instructions = Some("be consistent and helpful".to_string());
+
+    let ctrl_c = std::sync::Arc::new(tokio::sync::Notify::new());
+    let CodexSpawnOk { codex, .. } = Codex::spawn(
+        config,
+        Some(CodexAuth::from_api_key("Test API Key")),
+        ctrl_c.clone(),
+    )
+    .await
+    .unwrap();
+
+    // First user input → first request
+    codex
+        .submit(Op::UserInput {
+            items: vec![InputItem::Text {
+                text: "hello 1".into(),
+            }],
+        })
+        .await
+        .unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    // Second user input → second request
+    codex
+        .submit(Op::UserInput {
+            items: vec![InputItem::Text {
+                text: "hello 2".into(),
+            }],
+        })
+        .await
+        .unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    // Collect both requests and inspect their bodies
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2, "expected two POST requests");
+
+    let body1 = requests[0].body_json::<serde_json::Value>().unwrap();
+    let body2 = requests[1].body_json::<serde_json::Value>().unwrap();
+
+    // Build deep-equal expected prefix messages and validate with assert_eq!
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    let expected_env_text = format!(
+        "<environment_context>\n\nCurrent working directory: {}\nApproval policy: on-request\nSandbox policy: read-only\nNetwork access: restricted\n\n</environment_context>",
+        cwd
+    );
+    let expected_ui_text = "<user_instructions>\n\nbe consistent and helpful\n\n</user_instructions>";
+
+    let expected_env_msg = serde_json::json!({
+        "type": "message",
+        "id": serde_json::Value::Null,
+        "role": "user",
+        "content": [ { "type": "input_text", "text": expected_env_text } ]
+    });
+    let expected_ui_msg = serde_json::json!({
+        "type": "message",
+        "id": serde_json::Value::Null,
+        "role": "user",
+        "content": [ { "type": "input_text", "text": expected_ui_text } ]
+    });
+
+    assert_eq!(body1["input"][0], expected_env_msg);
+    assert_eq!(body1["input"][1], expected_ui_msg);
+    assert_eq!(body2["input"][0], expected_env_msg);
+    assert_eq!(body2["input"][1], expected_ui_msg);
+
+    // Ensure they are prefixed exactly once: no other items in the conversation contain the tags
+    let contains_tag = |v: &serde_json::Value, tag: &str| -> bool {
+        v["content"][0]["text"]
+            .as_str()
+            .map(|t| t.contains(tag))
+            .unwrap_or(false)
+    };
+
+    let mut extra_env_tags = 0usize;
+    let mut extra_ui_tags = 0usize;
+    for v in body1["input"].as_array().unwrap().iter().skip(2) {
+        if contains_tag(v, "<environment_context>") || contains_tag(v, "</environment_context>") {
+            extra_env_tags += 1;
+        }
+        if contains_tag(v, "<user_instructions>") || contains_tag(v, "</user_instructions>") {
+            extra_ui_tags += 1;
+        }
+    }
+    assert_eq!(
+        extra_env_tags, 0,
+        "environment_context appeared more than once in request 1"
+    );
+    assert_eq!(
+        extra_ui_tags, 0,
+        "user_instructions appeared more than once in request 1"
+    );
+
+    let mut extra_env_tags2 = 0usize;
+    let mut extra_ui_tags2 = 0usize;
+    for v in body2["input"].as_array().unwrap().iter().skip(2) {
+        if contains_tag(v, "<environment_context>") || contains_tag(v, "</environment_context>") {
+            extra_env_tags2 += 1;
+        }
+        if contains_tag(v, "<user_instructions>") || contains_tag(v, "</user_instructions>") {
+            extra_ui_tags2 += 1;
+        }
+    }
+    assert_eq!(
+        extra_env_tags2, 0,
+        "environment_context appeared more than once in request 2"
+    );
+    assert_eq!(
+        extra_ui_tags2, 0,
+        "user_instructions appeared more than once in request 2"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn azure_overrides_assign_properties_used_for_responses_url() {
     #![allow(clippy::unwrap_used)]
 
