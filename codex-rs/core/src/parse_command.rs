@@ -77,11 +77,20 @@ pub fn parse_command(command: &[String]) -> Vec<ParsedCommand> {
     // main action (e.g., a sed range over a file) is surfaced cleanly.
     if parsed.len() >= 2 {
         let has_and_and = normalized.iter().any(|t| t == "&&");
+        let contains_test = parsed
+            .iter()
+            .any(|pc| matches!(pc, ParsedCommand::Test { .. }));
         parsed.retain(|pc| match pc {
             ParsedCommand::Unknown { cmd } => {
                 if let Some(first) = cmd.first() {
                     // Drop cosmetic echo segments in chained commands
                     if has_and_and && first == "echo" {
+                        return false;
+                    }
+                    // In non-bash chained commands, ignore directory changes like `cd foo`
+                    // when the sequence includes a recognized test command. Preserve `cd`
+                    // for other sequences (e.g., followed by a search command).
+                    if has_and_and && contains_test && first == "cd" {
                         return false;
                     }
                     if first == "nl" {
@@ -784,7 +793,9 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
                 .iter()
                 .filter(|p| !p.starts_with('-'))
                 .collect();
-            let query = non_flags.first().map(|s| short_display_path(s));
+            // Do not shorten the query: grep patterns may legitimately contain slashes
+            // and should be preserved verbatim. Only paths should be shortened.
+            let query = non_flags.first().cloned().map(|s| s.to_string());
             let path = non_flags.get(1).map(|s| short_display_path(s));
             ParsedCommand::Search {
                 cmd: main_cmd.to_vec(),
@@ -1206,6 +1217,21 @@ mod tests {
                 ]),
                 query: Some("CODEX_SANDBOX_ENV_VAR".to_string()),
                 path: Some("spawn.rs".to_string()),
+                files_only: false,
+            }],
+        );
+    }
+
+    #[test]
+    fn supports_grep_query_with_slashes_not_shortened() {
+        // Query strings may contain slashes and should not be shortened to the basename.
+        // Previously, grep queries were passed through short_display_path, which is incorrect.
+        assert_parsed(
+            &vec_str(&["grep", "-R", "src/main.rs", "-n", "."]),
+            vec![ParsedCommand::Search {
+                cmd: vec_str(&["grep", "-R", "src/main.rs", "-n", "."]),
+                query: Some("src/main.rs".to_string()),
+                path: Some(".".to_string()),
                 files_only: false,
             }],
         );
