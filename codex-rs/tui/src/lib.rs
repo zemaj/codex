@@ -42,6 +42,8 @@ mod markdown;
 mod markdown_utils;
 mod markdown_stream;
 mod line_utils;
+mod render;
+mod streaming;
 pub mod onboarding;
 mod session_log;
 mod shimmer;

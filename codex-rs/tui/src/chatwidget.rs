@@ -50,8 +50,7 @@ use crate::exec_command::strip_bash_lc_and_escape;
 use crate::history_cell::CommandOutput;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PatchEventType;
-use crate::markdown_stream::AnimatedLineStreamer;
-use crate::markdown_stream::MarkdownStreamCollector;
+// streaming internals are provided by crate::streaming and crate::markdown_stream
 use crate::user_approval_widget::ApprovalRequest;
 use codex_file_search::FileMatch;
 
@@ -80,9 +79,8 @@ pub(crate) struct ChatWidget<'a> {
     finishing_after_drain: bool,
     // Queue of interruptive UI events deferred during an active write cycle
     interrupt_queue: VecDeque<QueuedInterrupt>,
-    // Ensure we emit each stream header at most once per turn
-    reasoning_header_emitted_this_turn: bool,
-    answer_header_emitted_this_turn: bool,
+    // Header emission state and logic
+    header: crate::streaming::HeaderEmitter,
 }
 
 struct UserMessage {
@@ -90,32 +88,11 @@ struct UserMessage {
     image_paths: Vec<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StreamKind {
-    Answer,
-    Reasoning,
-}
+use crate::streaming::StreamKind;
 
-struct StreamState {
-    collector: MarkdownStreamCollector,
-    streamer: AnimatedLineStreamer,
-    header_emitted: bool,
-}
+use crate::streaming::StreamState;
 
-impl StreamState {
-    fn new() -> Self {
-        Self {
-            collector: MarkdownStreamCollector::new(),
-            streamer: AnimatedLineStreamer::new(),
-            header_emitted: false,
-        }
-    }
-    fn clear(&mut self) {
-        self.collector.clear();
-        self.streamer.clear();
-        self.header_emitted = false;
-    }
-}
+use crate::streaming::HeaderEmitter;
 
 #[derive(Debug)]
 enum QueuedInterrupt {
@@ -144,6 +121,31 @@ fn create_initial_user_message(text: String, image_paths: Vec<PathBuf>) -> Optio
 }
 
 impl ChatWidget<'_> {
+    /// Compute the subset of `rendered_final` that still needs to be inserted into history.
+    ///
+    /// Invariant between collector and streamer:
+    /// - `MarkdownStreamCollector::committed_count()` tracks how many logical lines have been
+    ///   committed so far during streaming.
+    /// - `AnimatedLineStreamer::len()` returns how many of those committed lines are still queued
+    ///   for insertion into history (i.e., have not yet been inserted by commit ticks).
+    ///
+    /// Therefore the number of lines that have already been inserted into history is
+    /// `committed_count - queued_len`. To avoid duplication on finalization, we skip that many
+    /// lines from the fully rendered final output and return only the remaining tail.
+    fn compute_remaining_final_lines_for_state(
+        &self,
+        state: &StreamState,
+        rendered_final: &[ratatui::text::Line<'static>],
+    ) -> Vec<ratatui::text::Line<'static>> {
+        let committed = state.collector.committed_count();
+        let queued = state.streamer.len();
+        let already_inserted = committed.saturating_sub(queued);
+        if already_inserted >= rendered_final.len() {
+            Vec::new()
+        } else {
+            rendered_final[already_inserted..].to_vec()
+        }
+    }
     fn state_mut(&mut self, kind: StreamKind) -> &mut StreamState {
         match kind {
             StreamKind::Reasoning => &mut self.reasoning,
@@ -164,19 +166,8 @@ impl ChatWidget<'_> {
         kind: StreamKind,
         out_lines: &mut Vec<ratatui::text::Line<'static>>,
     ) {
-        let already_emitted_this_turn = match kind {
-            StreamKind::Reasoning => self.reasoning_header_emitted_this_turn,
-            StreamKind::Answer => self.answer_header_emitted_this_turn,
-        };
-        let state = self.state_mut(kind);
-        if !state.header_emitted && !already_emitted_this_turn {
+        if self.header.maybe_emit(kind, out_lines) {
             debug!(target: "chatwidget", "emit_header: kind={:?}", kind);
-            out_lines.push(Self::header_line(kind));
-            state.header_emitted = true;
-            match kind {
-                StreamKind::Reasoning => self.reasoning_header_emitted_this_turn = true,
-                StreamKind::Answer => self.answer_header_emitted_this_turn = true,
-            }
         }
     }
     fn header_line(kind: StreamKind) -> ratatui::text::Line<'static> {
@@ -199,9 +190,9 @@ impl ChatWidget<'_> {
         let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
         self.emit_header_if_needed(kind, &mut lines);
 
-        let step = match kind {
-            StreamKind::Reasoning => self.reasoning.streamer.step(),
-            StreamKind::Answer => self.answer.streamer.step(),
+        let step = {
+            let state = self.state_mut(kind);
+            state.step()
         };
         if !step.history.is_empty() || !lines.is_empty() {
             debug!(target: "chatwidget", "commit_tick: kind={:?} lines_emitted={} (including header={})", kind, step.history.len(), !lines.is_empty());
@@ -210,10 +201,7 @@ impl ChatWidget<'_> {
         }
 
         // If streamer is now idle and there is no more active stream data, finalize state.
-        let is_idle = match kind {
-            StreamKind::Reasoning => self.reasoning.streamer.is_idle(),
-            StreamKind::Answer => self.answer.streamer.is_idle(),
-        };
+        let is_idle = self.state_mut(kind).is_idle();
         if is_idle {
             // Stop animation ticks between bursts.
             self.app_event_tx.send(AppEvent::StopCommitAnimation);
@@ -412,8 +400,7 @@ impl ChatWidget<'_> {
             task_complete_pending: false,
             finishing_after_drain: false,
             interrupt_queue: VecDeque::new(),
-            reasoning_header_emitted_this_turn: false,
-            answer_header_emitted_this_turn: false,
+            header: HeaderEmitter::new(),
         }
     }
 
@@ -506,7 +493,8 @@ impl ChatWidget<'_> {
                 // collector even if the active stream was torn down (e.g. due to
                 // earlier finalize of another stream) before this event arrived.
                 let answer_started =
-                    self.answer.header_emitted || self.current_stream == Some(StreamKind::Answer);
+                    self.header.has_emitted_for_stream(StreamKind::Answer)
+                        || self.current_stream == Some(StreamKind::Answer);
 
                 if !message.is_empty() {
                     // Ensure we're in Answer stream.
@@ -526,19 +514,10 @@ impl ChatWidget<'_> {
                         &self.config,
                     );
 
-                    // Determine how many lines were already inserted into history.
-                    let previously_committed = self.answer.collector.committed_count();
-                    let pending_in_queue = self.answer.streamer.len();
-                    let already_inserted = previously_committed.saturating_sub(pending_in_queue);
-
                     // Replace streamer contents with only the remaining lines beyond what
                     // has already been inserted into history.
-                    let remaining: Vec<ratatui::text::Line<'static>> =
-                        if already_inserted >= rendered_final.len() {
-                            Vec::new()
-                        } else {
-                            rendered_final[already_inserted..].to_vec()
-                        };
+                    let remaining = self
+                        .compute_remaining_final_lines_for_state(&self.answer, &rendered_final);
                     self.answer.streamer.clear();
                     if !remaining.is_empty() {
                         self.answer.streamer.enqueue(remaining);
@@ -605,13 +584,8 @@ impl ChatWidget<'_> {
                 // Replace composer with single-line spinner while waiting.
                 self.bottom_pane
                     .update_status_text("waiting for model".to_string());
-                // New turn: allow headers to be emitted again.
-                self.reasoning_header_emitted_this_turn = false;
-                self.answer_header_emitted_this_turn = false;
-                // Ensure stream header state is reset at turn start so the next
-                // stream emits its header even if prior cleanup paths missed.
-                self.reasoning.header_emitted = false;
-                self.answer.header_emitted = false;
+                // New turn: reset header emission state so each header can be emitted once.
+                self.header.reset_for_new_turn();
                 self.request_redraw();
             }
             EventMsg::TaskComplete(TaskCompleteEvent {
@@ -862,10 +836,10 @@ impl ChatWidget<'_> {
                 let prev_state = self.state_mut(current);
                 let newly_completed = prev_state.collector.commit_complete_lines(&cfg);
                 if !newly_completed.is_empty() {
-                    prev_state.streamer.enqueue(newly_completed);
+                    prev_state.enqueue(newly_completed);
                 }
-                let step = prev_state.streamer.drain_all();
-                if !step.history.is_empty() || !prev_state.header_emitted {
+                let step = prev_state.drain_all();
+                if !step.history.is_empty() || !self.header.has_emitted_for_stream(current) {
                     let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
                     self.emit_header_if_needed(current, &mut lines);
                     lines.extend(step.history);
@@ -892,7 +866,7 @@ impl ChatWidget<'_> {
             self.current_stream = Some(kind);
             debug!(target: "chatwidget", "begin_stream: {:?} (prev={:?})", kind, prev);
             if prev.is_some() {
-                self.state_mut(kind).header_emitted = false;
+                self.header.reset_for_stream(kind);
             }
             // Ensure the waiting status is visible (composer replaced).
             self.bottom_pane
@@ -922,7 +896,7 @@ impl ChatWidget<'_> {
             let newly_completed = state.collector.commit_complete_lines(&cfg);
             if !newly_completed.is_empty() {
                 debug!(target: "chatwidget", "enqueue_completed: count={}", newly_completed.len());
-                state.streamer.enqueue(newly_completed);
+                state.enqueue(newly_completed);
                 // Start or continue commit animation.
                 self.app_event_tx.send(AppEvent::StartCommitAnimation);
             }
@@ -949,10 +923,10 @@ impl ChatWidget<'_> {
                 let state = self.state_mut(kind);
                 if !remaining.is_empty() {
                     debug!(target: "chatwidget", "finalize_immediate_emit: count={}", remaining.len());
-                    state.streamer.enqueue(remaining);
+                    state.enqueue(remaining);
                 }
                 // Drain everything queued and append a single trailing blank spacer.
-                let step = state.streamer.drain_all();
+                let step = state.drain_all();
                 lines.extend(step.history);
             }
             if lines
@@ -993,12 +967,12 @@ impl ChatWidget<'_> {
             if !remaining.is_empty() {
                 debug!(target: "chatwidget", "finalize_enqueue_remaining: count={}", remaining.len());
                 let state = self.state_mut(kind);
-                state.streamer.enqueue(remaining);
+                state.enqueue(remaining);
             }
             // Trailing blank spacer will be animated out via commit ticks.
             {
                 let state = self.state_mut(kind);
-                state.streamer.enqueue(vec![ratatui::text::Line::from("")]);
+                state.enqueue(vec![ratatui::text::Line::from("")]);
             }
             // Mark that we should clear state after draining.
             self.finishing_after_drain = true;
@@ -1166,8 +1140,7 @@ mod chatwidget_helper_tests {
             task_complete_pending: false,
             finishing_after_drain: false,
             interrupt_queue: VecDeque::new(),
-            reasoning_header_emitted_this_turn: false,
-            answer_header_emitted_this_turn: false,
+            header: HeaderEmitter::new(),
         };
         (widget, rx, op_rx)
     }

@@ -6,22 +6,26 @@ use std::sync::Mutex;
 
 use codex_core::config::Config;
 use codex_core::protocol::Op;
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
+use once_cell::sync::OnceCell;
 use serde::Serialize;
 use serde_json::json;
 
 use crate::app_event::AppEvent;
 
-lazy_static! {
-    static ref LOGGER: SessionLogger = SessionLogger::default();
-}
+static LOGGER: Lazy<SessionLogger> = Lazy::new(SessionLogger::new);
 
-#[derive(Default)]
 struct SessionLogger {
-    file: Mutex<Option<File>>,
+    file: OnceCell<Mutex<File>>,
 }
 
 impl SessionLogger {
+    fn new() -> Self {
+        Self {
+            file: OnceCell::new(),
+        }
+    }
+
     fn open(&self, path: PathBuf) -> std::io::Result<()> {
         let mut opts = OpenOptions::new();
         opts.create(true).truncate(true).write(true);
@@ -33,34 +37,40 @@ impl SessionLogger {
         }
 
         let file = opts.open(path)?;
-        let mut guard = match self.file.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        *guard = Some(file);
+        // If already initialized, ignore and succeed.
+        if self.file.get().is_some() {
+            return Ok(());
+        }
+        let _ = self.file.set(Mutex::new(file));
         Ok(())
     }
 
     fn write_json_line(&self, value: serde_json::Value) {
-        let mut guard = match self.file.lock() {
+        let Some(mutex) = self.file.get() else { return; };
+        let mut guard = match mutex.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if let Some(file) = guard.as_mut() {
-            if let Ok(serialized) = serde_json::to_string(&value) {
-                let _ = file.write_all(serialized.as_bytes());
-                let _ = file.write_all(b"\n");
-                let _ = file.flush();
+        match serde_json::to_string(&value) {
+            Ok(serialized) => {
+                if let Err(e) = guard.write_all(serialized.as_bytes()) {
+                    tracing::warn!("session log write error: {}", e);
+                    return;
+                }
+                if let Err(e) = guard.write_all(b"\n") {
+                    tracing::warn!("session log write error: {}", e);
+                    return;
+                }
+                if let Err(e) = guard.flush() {
+                    tracing::warn!("session log flush error: {}", e);
+                }
             }
+            Err(e) => tracing::warn!("session log serialize error: {}", e),
         }
     }
 
     fn is_enabled(&self) -> bool {
-        let guard = match self.file.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        guard.is_some()
+        self.file.get().is_some()
     }
 }
 
