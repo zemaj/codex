@@ -428,4 +428,25 @@ mod tests {
         assert!(rendered.iter().any(|s| s.contains("vscode://file")));
         assert!(rendered.iter().any(|s| s == "    Inside 【F:/x.rs†L2】"));
     }
+
+    #[test]
+    fn append_markdown_preserves_full_text_line() {
+        use codex_core::config_types::UriBasedFileOpener;
+        use std::path::Path;
+        let src = "Hi! How can I help with codex-rs today? Want me to explore the repo, run tests, or work on a specific change?\n";
+        let cwd = Path::new("/");
+        let mut out = Vec::new();
+        append_markdown_with_opener_and_cwd(src, &mut out, UriBasedFileOpener::None, cwd);
+        assert_eq!(out.len(), 1, "expected a single rendered line for plain text");
+        let rendered: String = out
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.clone())
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(
+            rendered,
+            "Hi! How can I help with codex-rs today? Want me to explore the repo, run tests, or work on a specific change?"
+        );
+    }
 }

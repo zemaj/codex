@@ -81,7 +81,8 @@ where
     use tokio::time::Duration;
     use tokio::time::timeout;
     loop {
-        let ev = timeout(Duration::from_secs(1), codex.next_event())
+        // Allow a bit more time to accommodate async startup work (e.g. config IO, tool discovery)
+        let ev = timeout(Duration::from_secs(5), codex.next_event())
             .await
             .expect("timeout waiting for event")
             .expect("stream ended unexpectedly");

@@ -25,8 +25,44 @@ impl MarkdownNewlineCollector {
         self.committed_line_count = 0;
     }
 
+    /// Replace the entire buffered content with `s`, resetting commit state.
+    pub fn replace_with(&mut self, s: &str) {
+        self.buffer.clear();
+        self.buffer.push_str(s);
+        self.committed_line_count = 0;
+    }
+
+    /// Returns the number of rendered logical lines that were previously committed.
+    pub fn committed_count(&self) -> usize {
+        self.committed_line_count
+    }
+
+    /// Replace the buffered content and mark that the first `committed_count`
+    /// logical lines are already committed.
+    pub fn replace_with_and_mark_committed(&mut self, s: &str, committed_count: usize) {
+        self.buffer.clear();
+        self.buffer.push_str(s);
+        self.committed_line_count = committed_count;
+    }
+
     pub fn push_delta(&mut self, delta: &str) {
         self.buffer.push_str(delta);
+    }
+
+    /// Insert a paragraph/section separator if one is not already present at the
+    /// end of the buffer. Ensures the next content starts after a blank line.
+    pub fn insert_section_break(&mut self) {
+        if self.buffer.is_empty() {
+            return;
+        }
+        if self.buffer.ends_with("\n\n") {
+            return;
+        }
+        if self.buffer.ends_with('\n') {
+            self.buffer.push('\n');
+        } else {
+            self.buffer.push_str("\n\n");
+        }
     }
 
     /// Render the full buffer and return only the newly completed logical lines
@@ -186,15 +222,42 @@ fn unwrap_markdown_language_fence_if_enabled(s: String) -> String {
 
 #[cfg(not(test))]
 fn unwrap_markdown_language_fence_if_enabled(s: String) -> String {
-    // Best-effort unwrap of a single outer ```markdown fence.
-    // This is intentionally simple; we can refine as needed later.
-    const OPEN: &str = "```markdown\n";
-    const CLOSE: &str = "\n```\n";
-    if s.starts_with(OPEN) && s.ends_with(CLOSE) {
-        let inner = s[OPEN.len()..s.len() - CLOSE.len()].to_string();
-        return inner;
+    // Best-effort unwrap of a single outer fenced markdown block.
+    // Recognizes common forms like ```markdown, ```md (any case), optional
+    // surrounding whitespace, and flexible trailing newlines/CRLF.
+    // If the block is not recognized, return the input unchanged.
+    let mut lines = s.lines().collect::<Vec<_>>();
+    if lines.len() < 2 {
+        return s;
     }
-    s
+
+    // Identify opening fence and language.
+    let open = lines.first().map(|l| l.trim_start()).unwrap_or("");
+    if !open.starts_with("```") {
+        return s;
+    }
+    let lang = open.trim_start_matches("```").trim();
+    let is_markdown_lang = lang.eq_ignore_ascii_case("markdown") || lang.eq_ignore_ascii_case("md");
+    if !is_markdown_lang {
+        return s;
+    }
+
+    // Find the last non-empty line and ensure it is a closing fence.
+    let mut last_idx = lines.len() - 1;
+    while last_idx > 0 && lines[last_idx].trim().is_empty() {
+        last_idx -= 1;
+    }
+    if lines[last_idx].trim() != "```" {
+        return s;
+    }
+
+    // Reconstruct the inner content between the fences.
+    let mut out = String::new();
+    for i in 1..last_idx {
+        out.push_str(lines[i]);
+        out.push('\n');
+    }
+    out
 }
 
 pub(crate) struct StepResult {
@@ -224,7 +287,7 @@ impl RenderedLineStreamer {
         }
     }
 
-    pub fn step(&mut self, _live_max_rows: usize) -> StepResult {
+    pub fn step(&mut self) -> StepResult {
         let mut history = Vec::new();
         // Move exactly one per tick to animate gradual insertion.
         let burst = if self.queue.is_empty() { 0 } else { 1 };
@@ -237,7 +300,7 @@ impl RenderedLineStreamer {
         StepResult { history }
     }
 
-    pub fn drain_all(&mut self, _live_max_rows: usize) -> StepResult {
+    pub fn drain_all(&mut self) -> StepResult {
         let mut history = Vec::new();
         while let Some(l) = self.queue.pop_front() {
             history.push(l);
@@ -247,6 +310,10 @@ impl RenderedLineStreamer {
 
     pub fn is_idle(&self) -> bool {
         self.queue.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.queue.len()
     }
 }
 

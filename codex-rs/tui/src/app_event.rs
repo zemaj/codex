@@ -7,6 +7,7 @@ use crate::app::ChatWidgetArgs;
 use crate::slash_command::SlashCommand;
 
 #[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
 pub(crate) enum AppEvent {
     CodexEvent(Event),
 

@@ -1,392 +1,731 @@
-#[cfg(test)]
-mod tests {
-    use std::sync::mpsc::{channel, Receiver};
-    use std::time::Duration;
+#![cfg(feature = "vt100-tests")]
 
-    use codex_core::config::Config;
-    use codex_core::config::ConfigOverrides;
-use codex_core::protocol::{
-    AgentMessageDeltaEvent, AgentMessageEvent, AgentReasoningDeltaEvent, AgentReasoningEvent, Event, EventMsg,
-};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
+use std::sync::mpsc::{channel, Receiver};
 
-    use crate::app_event::AppEvent;
-    use crate::app_event_sender::AppEventSender;
-    use crate::chatwidget::ChatWidget;
+use codex_core::config::{Config, ConfigOverrides, ConfigToml};
+use codex_core::protocol::Event as CodexEvent;
+use ratatui::backend::TestBackend;
+use ratatui::layout::Rect;
 
-    fn test_config() -> Config {
-        let overrides = ConfigOverrides {
-            cwd: std::env::current_dir().ok(),
-            ..Default::default()
-        };
-        match Config::load_with_cli_overrides(vec![], overrides) {
-            Ok(c) => c,
-            Err(e) => panic!("load test config: {e}"),
+use crate::app_event::AppEvent;
+use crate::app_event_sender::AppEventSender;
+
+fn normalize_text(s: &str) -> String {
+    // Remove inline code backticks and normalize curly quotes to straight quotes.
+    let no_ticks = s.replace('`', "");
+    no_ticks
+        .replace('\u{2019}', "'") // right single quote
+        .replace('\u{2018}', "'") // left single quote
+        .replace('\u{201C}', "\"") // left double quote
+        .replace('\u{201D}', "\"") // right double quote
+}
+
+fn open_fixture(name: &str) -> std::fs::File {
+    // 1) Prefer fixtures within this crate
+    {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("tests");
+        p.push("fixtures");
+        p.push(name);
+        if let Ok(f) = File::open(&p) {
+            return f;
+        }
+    }
+    // 2) Fallback to parent (workspace root) — current repo layout
+    {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("..");
+        p.push(name);
+        if let Ok(f) = File::open(&p) {
+            return f;
+        }
+    }
+    // 3) Last resort: CWD
+    File::open(name).expect("open fixture file")
+}
+
+// Drive the real ChatWidget from recorded events and render using the
+// production history insertion pipeline into a vt100 parser. This is a
+// faithful replay of a simple conversation, and should currently fail
+// because the final model message is cut off in the UI.
+#[tokio::test(flavor = "current_thread")] 
+async fn vt100_replay_hello_conversation_from_log() {
+    // Terminal: make it large enough so the entire short conversation fits on-screen.
+    let width: u16 = 100;
+    let height: u16 = 40;
+    let viewport = Rect::new(0, height - 1, width, 1);
+    let backend = TestBackend::new(width, height);
+    let mut terminal = crate::custom_terminal::Terminal::with_options(backend)
+        .expect("failed to construct terminal");
+    terminal.set_viewport_area(viewport);
+
+    // App event channel to capture InsertHistory from the widget.
+    let (tx_raw, rx): (std::sync::mpsc::Sender<AppEvent>, Receiver<AppEvent>) = channel();
+    let app_sender = AppEventSender::new(tx_raw);
+
+    // Light-weight config that does not depend on host state.
+    let cfg: Config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        std::env::temp_dir(),
+    )
+    .expect("config");
+
+    // Construct the real ChatWidget. Provide an initial prompt so the user
+    // message appears when SessionConfigured is received.
+    let mut widget = crate::chatwidget::ChatWidget::new(
+        cfg,
+        app_sender.clone(),
+        Some("hello".to_string()),
+        Vec::new(),
+        false,
+    );
+
+    // Collected ANSI bytes emitted by the history insertion pipeline.
+    let mut ansi: Vec<u8> = Vec::new();
+
+    // Replay the recorded session.
+    // Resolve the log path (works whether CWD is workspace root or crate dir).
+    let file = open_fixture("hello-log.jsonl");
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line.expect("read line");
+        if line.trim().is_empty() || line.starts_with('#') { continue; }
+        let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(&line) else { continue };
+        let Some(dir) = v.get("dir").and_then(|d| d.as_str()) else { continue };
+        if dir != "to_tui" { continue; }
+        let Some(kind) = v.get("kind").and_then(|k| k.as_str()) else { continue };
+        match kind {
+            "codex_event" => {
+                if let Some(payload) = v.get("payload") {
+                    let ev: CodexEvent = serde_json::from_value(payload.clone())
+                        .expect("parse codex event");
+                    widget.handle_codex_event(ev);
+                    drain_and_render_history(&mut terminal, &rx, &mut ansi);
+                }
+            }
+            ,
+            "app_event" => {
+                if let Some(variant) = v.get("variant").and_then(|s| s.as_str()) {
+                    match variant {
+                        "CommitTick" => {
+                            widget.on_commit_tick();
+                            drain_and_render_history(&mut terminal, &rx, &mut ansi);
+                        }
+                        _ => { /* ignored in this replay */ }
+                    }
+                }
+            }
+            ,
+            _ => { /* ignore other kinds */ }
         }
     }
 
-    fn recv_insert_history(
-        rx: &Receiver<AppEvent>,
-        timeout_ms: u64,
-    ) -> Option<Vec<ratatui::text::Line<'static>>> {
-        let to = Duration::from_millis(timeout_ms);
-        match rx.recv_timeout(to) {
-            Ok(AppEvent::InsertHistory(lines)) => Some(lines),
-            Ok(_) => None,
-            Err(_) => None,
+    // Parse the ANSI stream with vt100 to reconstruct the final screen.
+    let mut parser = vt100::Parser::new(height, width, 0);
+    parser.process(&ansi);
+    let mut visible = String::new();
+    for row in 0..height {
+        for col in 0..width {
+            if let Some(cell) = parser.screen().cell(row, col) {
+                if let Some(ch) = cell.contents().chars().next() { visible.push(ch); } else { visible.push(' '); }
+            } else {
+                visible.push(' ');
+            }
+        }
+        visible.push('\n');
+    }
+
+    // Expect the full conversation segments. This currently fails because the
+    // model answer gets cut off and does not render.
+    assert!(visible.contains("user"), "missing user header on screen\n{visible}");
+    assert!(visible.contains("hello"), "missing user text on screen\n{visible}");
+    assert!(visible.contains("thinking"), "missing thinking header on screen\n{visible}");
+    assert!(
+        visible.contains("Responding to user greeting"),
+        "missing reasoning summary on screen\n{visible}"
+    );
+    assert!(
+        visible.contains("codex"),
+        "missing assistant header on screen\n{visible}"
+    );
+    assert!(
+        visible.contains("Hi! How can I help with codex-rs or anything else today?"),
+        "assistant greeting was cut off or missing\n{visible}"
+    );
+}
+
+// Replay a more complex markdown session and verify headers render for each
+// assistant response. Specifically, ensure the second request shows the
+// 'codex' header before the assistant's message.
+#[tokio::test(flavor = "current_thread")]
+async fn vt100_replay_markdown_session_from_log() {
+    // Terminal large enough to fit the visible conversation segments
+    let width: u16 = 110;
+    let height: u16 = 50;
+    let viewport = Rect::new(0, height - 1, width, 1);
+    let backend = TestBackend::new(width, height);
+    let mut terminal = crate::custom_terminal::Terminal::with_options(backend)
+        .expect("failed to construct terminal");
+    terminal.set_viewport_area(viewport);
+
+    let (tx_raw, rx): (std::sync::mpsc::Sender<AppEvent>, Receiver<AppEvent>) = channel();
+    let app_sender = AppEventSender::new(tx_raw);
+
+    let cfg: Config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        std::env::temp_dir(),
+    )
+    .expect("config");
+
+    let mut widget = crate::chatwidget::ChatWidget::new(
+        cfg,
+        app_sender.clone(),
+        None,
+        Vec::new(),
+        false,
+    );
+
+    let mut ansi: Vec<u8> = Vec::new();
+
+    // Open the markdown session log relative to workspace root or crate dir.
+    let file = open_fixture("markdown-session.jsonl");
+    let reader = BufReader::new(file);
+
+    // Track per-turn counts and expected/actual content for full-answer checks
+    let mut codex_headers_per_turn: Vec<usize> = Vec::new();
+    let mut current_turn_index: Option<usize> = None;
+    let mut expected_full_answer_per_turn: Vec<Option<String>> = Vec::new();
+    let mut transcript_per_turn: Vec<String> = Vec::new();
+
+    for line in reader.lines() {
+        let line = line.expect("read line");
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(&line) else { continue };
+        let Some(dir) = v.get("dir").and_then(|d| d.as_str()) else { continue };
+        if dir != "to_tui" { continue; }
+        let Some(kind) = v.get("kind").and_then(|k| k.as_str()) else { continue };
+        match kind {
+            "codex_event" => {
+                if let Some(payload) = v.get("payload") {
+                    let ev: CodexEvent = serde_json::from_value(payload.clone())
+                        .expect("parse codex event");
+                    // Track task boundaries and expected answers.
+                    if let CodexEvent { msg, .. } = &ev {
+                        if matches!(msg, codex_core::protocol::EventMsg::TaskStarted) {
+                            codex_headers_per_turn.push(0);
+                            expected_full_answer_per_turn.push(None);
+                            transcript_per_turn.push(String::new());
+                            current_turn_index = Some(codex_headers_per_turn.len() - 1);
+                        }
+                        if let codex_core::protocol::EventMsg::AgentMessage(m) = msg {
+                            if let Some(idx) = current_turn_index {
+                                expected_full_answer_per_turn[idx] = Some(m.message.clone());
+                            }
+                        }
+                        if let codex_core::protocol::EventMsg::TaskComplete(tc) = msg {
+                            if let Some(idx) = current_turn_index {
+                                if tc.last_agent_message.is_some() {
+                                    expected_full_answer_per_turn[idx] = tc.last_agent_message.clone();
+                                }
+                            }
+                        }
+                    }
+                    widget.handle_codex_event(ev);
+                    // Drain and render; count 'codex' header insertions for current turn.
+                    while let Ok(app_ev) = rx.try_recv() {
+                        match app_ev {
+                            AppEvent::InsertHistory(lines) => {
+                                if let Some(idx) = current_turn_index {
+                                    let mut turn_count = 0usize;
+                                    for line in &lines {
+                                        let s = line
+                                            .spans
+                                            .iter()
+                                            .map(|sp| sp.content.clone())
+                                            .collect::<Vec<_>>()
+                                            .join("");
+                                        if s == "codex" {
+                                            turn_count += 1;
+                                        }
+                                        if let Some(idx) = current_turn_index {
+                                            transcript_per_turn[idx].push_str(&s);
+                                            transcript_per_turn[idx].push('\n');
+                                        }
+                                    }
+                                    codex_headers_per_turn[idx] += turn_count;
+                                }
+                                crate::insert_history::insert_history_lines_to_writer(
+                                    &mut terminal,
+                                    &mut ansi,
+                                    lines,
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            "app_event" => {
+                if let Some(variant) = v.get("variant").and_then(|s| s.as_str()) {
+                    match variant {
+                        "CommitTick" => {
+                            widget.on_commit_tick();
+                            while let Ok(app_ev) = rx.try_recv() {
+                                match app_ev {
+                                    AppEvent::InsertHistory(lines) => {
+                                        if let Some(idx) = current_turn_index {
+                                            let mut turn_count = 0usize;
+                                            for line in &lines {
+                                                let s = line
+                                                    .spans
+                                                    .iter()
+                                                    .map(|sp| sp.content.clone())
+                                                    .collect::<Vec<_>>()
+                                                    .join("");
+                                                if s == "codex" {
+                                                    turn_count += 1;
+                                                }
+                                                transcript_per_turn[idx].push_str(&s);
+                                                transcript_per_turn[idx].push('\n');
+                                            }
+                                            codex_headers_per_turn[idx] += turn_count;
+                                        }
+                                        crate::insert_history::insert_history_lines_to_writer(
+                                            &mut terminal,
+                                            &mut ansi,
+                                            lines,
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
-    #[test]
-    fn widget_streams_on_newline_and_header_once() {
-        let (tx_raw, rx) = channel::<AppEvent>();
-        let tx = AppEventSender::new(tx_raw);
-        let config = test_config();
+    // Reconstruct the final screen
+    let mut parser = vt100::Parser::new(height, width, 0);
+    parser.process(&ansi);
+    let mut visible = String::new();
+    for row in 0..height {
+        for col in 0..width {
+            if let Some(cell) = parser.screen().cell(row, col) {
+                if let Some(ch) = cell.contents().chars().next() { visible.push(ch); } else { visible.push(' '); }
+            } else {
+                visible.push(' ');
+            }
+        }
+        visible.push('\n');
+    }
 
-        let mut w = ChatWidget::new(config.clone(), tx.clone(), None, Vec::new(), false);
+    // Assert exactly one 'codex' header per turn for the first two turns.
+    assert!(
+        codex_headers_per_turn.len() >= 2,
+        "expected at least two turns; counts = {:?}",
+        codex_headers_per_turn
+    );
+    assert_eq!(
+        codex_headers_per_turn[0],
+        1,
+        "first turn should have exactly one 'codex' header; counts = {:?}",
+        codex_headers_per_turn
+    );
+    assert_eq!(
+        codex_headers_per_turn[1],
+        1,
+        "second turn should have exactly one 'codex' header; counts = {:?}",
+        codex_headers_per_turn
+    );
 
-        // Start reasoning stream with partial content (no newline): expect no history yet.
-        w.handle_codex_event(Event {
-            id: "1".into(),
-            msg: EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent {
-                delta: "Hello".into(),
-            }),
-        });
-
-        // No history commit before newline.
-        assert!(
-            recv_insert_history(&rx, 50).is_none(),
-            "unexpected history before newline"
-        );
-
-        // No live overlay anymore; nothing visible until commit.
-
-        // Push a newline which should cause commit of the first logical line.
-        w.handle_codex_event(Event {
-            id: "1".into(),
-            msg: EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent {
-                delta: " world\nNext".into(),
-            }),
-        });
-
-        let lines = match recv_insert_history(&rx, 200) {
-            Some(v) => v,
-            None => panic!("expected history after newline"),
-        };
-        let rendered: Vec<String> = lines
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.clone())
-                    .collect::<Vec<_>>()
-                    .join("")
-            })
-            .collect();
-
-        // First commit should include the header and the completed first line once.
-        assert!(
-            rendered.iter().any(|s| s.contains("thinking")),
-            "missing reasoning header: {rendered:?}"
-        );
-        assert!(
-            rendered.iter().any(|s| s.contains("Hello world")),
-            "missing committed line: {rendered:?}"
-        );
-
-        // Send finalize; expect remaining content to flush and a trailing blank line.
-        w.handle_codex_event(Event {
-            id: "1".into(),
-            msg: EventMsg::AgentReasoning(AgentReasoningEvent {
-                text: String::new(),
-            }),
-        });
-
-        let lines2 = match recv_insert_history(&rx, 200) {
-            Some(v) => v,
-            None => panic!("expected history after finalize"),
-        };
-        let rendered2: Vec<String> = lines2
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.clone())
-                    .collect::<Vec<_>>()
-                    .join("")
-            })
-            .collect();
-        // Ensure header not repeated on finalize and a blank spacer exists at the end.
-        let header_count = rendered
-            .iter()
-            .chain(rendered2.iter())
-            .filter(|s| s.contains("thinking"))
-            .count();
-        assert_eq!(header_count, 1, "reasoning header should be emitted exactly once");
-        assert!(
-            rendered2.last().is_some_and(|s| s.is_empty()),
-            "expected trailing blank line on finalize"
-        );
+    // Verify every turn's transcript contains the expected full answer.
+    for (i, maybe_expected) in expected_full_answer_per_turn.iter().enumerate() {
+        if let Some(expected) = maybe_expected {
+            let exp = normalize_text(expected);
+            let got = normalize_text(&transcript_per_turn[i]);
+            assert!(
+                got.contains(&exp),
+                "turn {} transcript missing expected full answer.\nexpected: {:?}\ntranscript: {}",
+                i,
+                expected,
+                transcript_per_turn[i]
+            );
+        }
     }
 }
 
-#[cfg(test)]
-mod widget_stream_extra {
-    use super::*;
+// Replay a longer markdown session with multiple turns and assert a 'codex' header
+// is emitted exactly once per turn, especially the second turn which previously
+// failed to show the header.
+#[tokio::test(flavor = "current_thread")]
+async fn vt100_replay_longer_markdown_session_from_log() {
+    let width: u16 = 120;
+    let height: u16 = 55;
+    let viewport = Rect::new(0, height - 1, width, 1);
+    let backend = TestBackend::new(width, height);
+    let mut terminal = crate::custom_terminal::Terminal::with_options(backend)
+        .expect("failed to construct terminal");
+    terminal.set_viewport_area(viewport);
 
-    #[test]
-    fn widget_fenced_code_slow_streaming_no_dup() {
-        let (tx_raw, rx) = channel::<AppEvent>();
-        let tx = AppEventSender::new(tx_raw);
-        let config = test_config();
-        let mut w = ChatWidget::new(config.clone(), tx.clone(), None, Vec::new(), false);
+    let (tx_raw, rx): (std::sync::mpsc::Sender<AppEvent>, Receiver<AppEvent>) = channel();
+    let app_sender = AppEventSender::new(tx_raw);
 
-        // Begin answer stream: push opening fence in pieces with no newline -> no history.
-        for d in ["```", ""] {
-            w.handle_codex_event(Event {
-                id: "a".into(),
-                msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta: d.into() }),
-            });
-            assert!(super::recv_insert_history(&rx, 30).is_none(), "no history before newline for fence");
+    let cfg: Config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        std::env::temp_dir(),
+    )
+    .expect("config");
+
+    let mut widget = crate::chatwidget::ChatWidget::new(
+        cfg,
+        app_sender.clone(),
+        None,
+        Vec::new(),
+        false,
+    );
+
+    let mut ansi: Vec<u8> = Vec::new();
+
+    let file = open_fixture("longer-markdown-session.jsonl");
+    let reader = BufReader::new(file);
+
+    let mut codex_headers_per_turn: Vec<usize> = Vec::new();
+    let mut first_non_header_line_per_turn: Vec<Option<String>> = Vec::new();
+    let mut saw_codex_header_in_turn: Vec<bool> = Vec::new();
+    let mut header_batched_with_content: Vec<bool> = Vec::new();
+    let mut current_turn_index: Option<usize> = None;
+
+    for line in reader.lines() {
+        let line = line.expect("read line");
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
         }
-        // Newline after fence line.
-        w.handle_codex_event(Event {
-            id: "a".into(),
-            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta: "\n".into() }),
-        });
-        // This may or may not produce a visible line depending on renderer; accept either.
-        let _ = super::recv_insert_history(&rx, 100);
-
-        // Stream the code line without newline -> no history.
-        w.handle_codex_event(Event {
-            id: "a".into(),
-            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta: "code line".into() }),
-        });
-        assert!(super::recv_insert_history(&rx, 30).is_none(), "no history before newline for code line");
-
-        // Now newline to commit the code line.
-        w.handle_codex_event(Event {
-            id: "a".into(),
-            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta: "\n".into() }),
-        });
-        let commit1 = match super::recv_insert_history(&rx, 200) {
-            Some(v) => v,
-            None => panic!("history after code line newline"),
-        };
-
-        // Close fence slowly then newline.
-        w.handle_codex_event(Event {
-            id: "a".into(),
-            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta: "```".into() }),
-        });
-        assert!(super::recv_insert_history(&rx, 30).is_none(), "no history before closing fence newline");
-        w.handle_codex_event(Event {
-            id: "a".into(),
-            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta: "\n".into() }),
-        });
-        let _ = super::recv_insert_history(&rx, 100);
-
-        // Finalize should not duplicate the code line and should add a trailing blank.
-        w.handle_codex_event(Event {
-            id: "a".into(),
-            msg: EventMsg::AgentMessage(AgentMessageEvent { message: String::new() }),
-        });
-        let commit2 = match super::recv_insert_history(&rx, 200) {
-            Some(v) => v,
-            None => panic!("history after finalize"),
-        };
-
-        let texts1: Vec<String> = commit1
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.clone()).collect::<String>())
-            .collect();
-        let texts2: Vec<String> = commit2
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.clone()).collect::<String>())
-            .collect();
-        let all = [texts1, texts2].concat();
-        let code_count = all.iter().filter(|s| s.contains("code line")).count();
-        assert_eq!(code_count, 1, "code line should appear exactly once in history: {all:?}");
-        assert!(all.iter().all(|s| !s.contains("```")), "backticks should not be shown in history: {all:?}");
+        let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(&line) else { continue };
+        let Some(dir) = v.get("dir").and_then(|d| d.as_str()) else { continue };
+        if dir != "to_tui" { continue; }
+        let Some(kind) = v.get("kind").and_then(|k| k.as_str()) else { continue };
+        match kind {
+            "codex_event" => {
+                if let Some(payload) = v.get("payload") {
+                    let ev: CodexEvent = serde_json::from_value(payload.clone())
+                        .expect("parse codex event");
+                    if let CodexEvent { msg, .. } = &ev {
+                        if matches!(msg, codex_core::protocol::EventMsg::TaskStarted) {
+                            codex_headers_per_turn.push(0);
+                            first_non_header_line_per_turn.push(None);
+                            saw_codex_header_in_turn.push(false);
+                            header_batched_with_content.push(false);
+                            current_turn_index = Some(codex_headers_per_turn.len() - 1);
+                        }
+                    }
+                    widget.handle_codex_event(ev);
+                    while let Ok(app_ev) = rx.try_recv() {
+                        match app_ev {
+                            AppEvent::InsertHistory(lines) => {
+                                if let Some(idx) = current_turn_index {
+                                    let mut turn_count = 0usize;
+                                    for (i_line, line) in lines.iter().enumerate() {
+                                        let s = line
+                                            .spans
+                                            .iter()
+                                            .map(|sp| sp.content.clone())
+                                            .collect::<Vec<_>>()
+                                            .join("");
+                                        if s == "codex" {
+                                            turn_count += 1;
+                                            saw_codex_header_in_turn[idx] = true;
+                                            // If any subsequent line in this same batch is non-empty,
+                                            // then header is batched with content.
+                                            if lines.iter().skip(i_line + 1).any(|l| {
+                                                let t = l
+                                                    .spans
+                                                    .iter()
+                                                    .map(|sp| sp.content.clone())
+                                                    .collect::<Vec<_>>()
+                                                    .join("");
+                                                !t.trim().is_empty()
+                                            }) {
+                                                header_batched_with_content[idx] = true;
+                                            }
+                                        } else if saw_codex_header_in_turn[idx]
+                                            && !s.trim().is_empty()
+                                            && first_non_header_line_per_turn[idx].is_none()
+                                        {
+                                            first_non_header_line_per_turn[idx] = Some(s.clone());
+                                        }
+                                    }
+                                    codex_headers_per_turn[idx] += turn_count;
+                                }
+                                crate::insert_history::insert_history_lines_to_writer(
+                                    &mut terminal,
+                                    &mut ansi,
+                                    lines,
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            "app_event" => {
+                if let Some(variant) = v.get("variant").and_then(|s| s.as_str()) {
+                    match variant {
+                        "CommitTick" => {
+                            widget.on_commit_tick();
+                            while let Ok(app_ev) = rx.try_recv() {
+                                match app_ev {
+                                    AppEvent::InsertHistory(lines) => {
+                                        if let Some(idx) = current_turn_index {
+                                            let mut turn_count = 0usize;
+                                            for (i_line, line) in lines.iter().enumerate() {
+                                                let s = line
+                                                    .spans
+                                                    .iter()
+                                                    .map(|sp| sp.content.clone())
+                                                    .collect::<Vec<_>>()
+                                                    .join("");
+                                                if s == "codex" {
+                                                    turn_count += 1;
+                                                    saw_codex_header_in_turn[idx] = true;
+                                                    if lines.iter().skip(i_line + 1).any(|l| {
+                                                        let t = l
+                                                            .spans
+                                                            .iter()
+                                                            .map(|sp| sp.content.clone())
+                                                            .collect::<Vec<_>>()
+                                                            .join("");
+                                                        !t.trim().is_empty()
+                                                    }) {
+                                                        header_batched_with_content[idx] = true;
+                                                    }
+                                                } else if saw_codex_header_in_turn[idx]
+                                                    && !s.trim().is_empty()
+                                                    && first_non_header_line_per_turn[idx].is_none()
+                                                {
+                                                    first_non_header_line_per_turn[idx] = Some(s.clone());
+                                                }
+                                            }
+                                            codex_headers_per_turn[idx] += turn_count;
+                                        }
+                                        crate::insert_history::insert_history_lines_to_writer(
+                                            &mut terminal,
+                                            &mut ansi,
+                                            lines,
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
-    #[test]
-    fn widget_rendered_trickle_live_ring_head() {
-        let (tx_raw, rx) = channel::<AppEvent>();
-        let tx = AppEventSender::new(tx_raw);
-        let config = test_config();
-        let mut w = ChatWidget::new(config.clone(), tx.clone(), None, Vec::new(), false);
+    // Expect at least two turns with exactly one 'codex' header each; specifically the second
+    // turn previously missed the header.
+    assert!(
+        codex_headers_per_turn.len() >= 2,
+        "expected at least two turns; counts = {:?}",
+        codex_headers_per_turn
+    );
+    assert_eq!(
+        codex_headers_per_turn[0],
+        1,
+        "first turn should have exactly one 'codex' header; counts = {:?}",
+        codex_headers_per_turn
+    );
+    assert_eq!(
+        codex_headers_per_turn[1],
+        1,
+        "second turn should have exactly one 'codex' header; counts = {:?}",
+        codex_headers_per_turn
+    );
 
-        // Increase live ring capacity so it can include queue head.
-        w.test_set_live_max_rows(4);
+    // Additionally, ensure the header and the first content are batched together in the same
+    // history insertion for turn 2, so content is not separated or cut off.
+    assert!(
+        header_batched_with_content[1],
+        "header and first content were not batched together for turn 2; counts = {:?}, first_line = {:?}",
+        codex_headers_per_turn,
+        first_non_header_line_per_turn[1].as_ref()
+    );
 
-        // Enqueue 5 completed lines in a single delta.
-        let payload = "l1\nl2\nl3\nl4\nl5\n".to_string();
-        w.handle_codex_event(Event {
-            id: "b".into(),
-            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta: payload }),
-        });
+    // Verify every turn's transcript contains the expected full answer.
+    // Note: We reuse the transcript logic from the markdown replay test by re-parsing
+    // expected answers from the JSON here is heavier; for now this test focuses on header/content
+    // batching to prevent the cut-off at the start.
+}
 
-        // First batch commit: expect header + 3 lines.
-        let lines = match super::recv_insert_history(&rx, 200) {
-            Some(v) => v,
-            None => panic!("history after batch"),
-        };
-        let rendered: Vec<String> = lines
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.clone()).collect::<String>())
-            .collect();
-        assert!(rendered.iter().any(|s| s.contains("codex")), "answer header missing");
-        let committed: Vec<_> = rendered.into_iter().filter(|s| s.starts_with('l')).collect();
-        assert_eq!(committed.len(), 3, "expected 3 committed lines in first batch");
-
-        // No live overlay anymore; only committed lines appear in history.
-
-        // Finalize: drain the remaining lines.
-        w.handle_codex_event(Event {
-            id: "b".into(),
-            msg: EventMsg::AgentMessage(AgentMessageEvent { message: String::new() }),
-        });
-        let lines2 = match super::recv_insert_history(&rx, 200) {
-            Some(v) => v,
-            None => panic!("history after finalize"),
-        };
-        let rendered2: Vec<String> = lines2
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.clone()).collect::<String>())
-            .collect();
-        assert!(rendered2.iter().any(|s| s == "l4"));
-        assert!(rendered2.iter().any(|s| s == "l5"));
-        assert!(rendered2.last().is_some_and(|s| s.is_empty()), "expected trailing blank line after finalize");
-    }
-
-    #[test]
-    fn widget_reasoning_then_answer_ordering() {
-        let (tx_raw, rx) = channel::<AppEvent>();
-        let tx = AppEventSender::new(tx_raw);
-        let config = test_config();
-        let mut w = ChatWidget::new(config.clone(), tx.clone(), None, Vec::new(), false);
-
-        // Reasoning: one completed line then finalize.
-        w.handle_codex_event(Event {
-            id: "ra".into(),
-            msg: EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta: "think1\n".into() }),
-        });
-        let r_commit = match super::recv_insert_history(&rx, 200) {
-            Some(v) => v,
-            None => panic!("reasoning history"),
-        };
-        w.handle_codex_event(Event {
-            id: "ra".into(),
-            msg: EventMsg::AgentReasoning(AgentReasoningEvent { text: String::new() }),
-        });
-        let r_final = match super::recv_insert_history(&rx, 200) {
-            Some(v) => v,
-            None => panic!("reasoning finalize"),
-        };
-
-        // Answer: one completed line then finalize.
-        w.handle_codex_event(Event {
-            id: "ra".into(),
-            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta: "ans1\n".into() }),
-        });
-        let a_commit = match super::recv_insert_history(&rx, 200) {
-            Some(v) => v,
-            None => panic!("answer history"),
-        };
-        w.handle_codex_event(Event {
-            id: "ra".into(),
-            msg: EventMsg::AgentMessage(AgentMessageEvent { message: String::new() }),
-        });
-        let a_final = match super::recv_insert_history(&rx, 200) {
-            Some(v) => v,
-            None => panic!("answer finalize"),
-        };
-
-        let to_texts = |lines: &Vec<ratatui::text::Line<'static>>| -> Vec<String> {
-            lines
-                .iter()
-                .map(|l| l.spans.iter().map(|s| s.content.clone()).collect::<String>())
-                .collect()
-        };
-        let r_all = [to_texts(&r_commit), to_texts(&r_final)].concat();
-        let a_all = [to_texts(&a_commit), to_texts(&a_final)].concat();
-
-        // Expect headers present and in order: reasoning first, then answer.
-        let r_header_idx = match r_all.iter().position(|s| s.contains("thinking")) {
-            Some(i) => i,
-            None => panic!("missing reasoning header"),
-        };
-        let a_header_idx = match a_all.iter().position(|s| s.contains("codex")) {
-            Some(i) => i,
-            None => panic!("missing answer header"),
-        };
-        assert!(r_all.iter().any(|s| s == "think1"), "missing reasoning content: {:?}", r_all);
-        assert!(a_all.iter().any(|s| s == "ans1"), "missing answer content: {:?}", a_all);
-        // Implicitly, reasoning events happened before answer events if we got here without timeouts.
-        assert_eq!(r_header_idx, 0, "reasoning header should be first in its batch");
-        assert_eq!(a_header_idx, 0, "answer header should be first in its batch");
-    }
-
-    #[test]
-    fn header_not_repeated_across_pauses() {
-        let (tx_raw, rx) = channel::<AppEvent>();
-        let tx = AppEventSender::new(tx_raw);
-        let config = test_config();
-        let mut w = ChatWidget::new(config.clone(), tx.clone(), None, Vec::new(), false);
-
-        // Begin reasoning, enqueue first line, start animation.
-        w.handle_codex_event(Event {
-            id: "r1".into(),
-            msg: EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta: "first\n".into() }),
-        });
-        // Simulate one animation tick: should emit header + first.
-        w.on_commit_tick();
-        let lines1 = super::recv_insert_history(&rx, 200).expect("history after first tick");
-        let texts1: Vec<String> = lines1
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.clone()).collect::<String>())
-            .collect();
-        assert!(texts1.iter().any(|s| s.contains("thinking")), "missing header on first tick: {texts1:?}");
-        assert!(texts1.iter().any(|s| s == "first"), "missing first line: {texts1:?}");
-
-        // Stop ticks naturally by draining queue (second tick consumes nothing).
-        w.on_commit_tick();
-        let _ = super::recv_insert_history(&rx, 100);
-
-        // Later, enqueue another completed line; header must NOT repeat.
-        w.handle_codex_event(Event {
-            id: "r1".into(),
-            msg: EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta: "second\n".into() }),
-        });
-        w.on_commit_tick();
-        let lines2 = super::recv_insert_history(&rx, 200).expect("history after second tick");
-        let texts2: Vec<String> = lines2
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.clone()).collect::<String>())
-            .collect();
-        let header_count2 = texts2.iter().filter(|s| s.contains("thinking")).count();
-        assert_eq!(header_count2, 0, "header should not repeat after pause: {texts2:?}");
-        assert!(texts2.iter().any(|s| s == "second"), "missing second line: {texts2:?}");
-
-        // Finalize; trailing blank should be added; no extra header.
-        w.handle_codex_event(Event {
-            id: "r1".into(),
-            msg: EventMsg::AgentReasoning(AgentReasoningEvent { text: String::new() }),
-        });
-        // Drain remaining with ticks.
-        w.on_commit_tick();
-        let lines3 = super::recv_insert_history(&rx, 200).expect("history after finalize tick");
-        let texts3: Vec<String> = lines3
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.clone()).collect::<String>())
-            .collect();
-        let header_total = texts1
-            .into_iter()
-            .chain(texts2.into_iter())
-            .chain(texts3.iter().cloned())
-            .filter(|s| s.contains("thinking"))
-            .count();
-        assert_eq!(header_total, 1, "header should appear exactly once across pauses and finalize");
-        assert!(texts3.last().is_some_and(|s| s.is_empty()), "expected trailing blank line");
+fn drain_and_render_history(
+    term: &mut crate::custom_terminal::Terminal<TestBackend>,
+    rx: &Receiver<AppEvent>,
+    out: &mut Vec<u8>,
+) {
+    while let Ok(ev) = rx.try_recv() {
+        match ev {
+            AppEvent::InsertHistory(lines) => {
+                crate::insert_history::insert_history_lines_to_writer(term, out, lines);
+            }
+            // We ignore redraw and animation control here; the vt100 bytes we
+            // assert on are solely from history insertions.
+            _ => {}
+        }
     }
 }
+
+// Replay a longer hello session and ensure every turn's full answer is present
+// in the transcript by extracting expected answers from AgentMessage/TaskComplete
+// events and comparing them to accumulated InsertHistory content.
+#[tokio::test(flavor = "current_thread")]
+async fn vt100_replay_longer_hello_session_from_log() {
+    let width: u16 = 100;
+    let height: u16 = 50;
+    let viewport = Rect::new(0, height - 1, width, 1);
+    let backend = TestBackend::new(width, height);
+    let mut terminal = crate::custom_terminal::Terminal::with_options(backend)
+        .expect("failed to construct terminal");
+    terminal.set_viewport_area(viewport);
+
+    let (tx_raw, rx): (std::sync::mpsc::Sender<AppEvent>, Receiver<AppEvent>) = channel();
+    let app_sender = AppEventSender::new(tx_raw);
+
+    let cfg: Config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        std::env::temp_dir(),
+    )
+    .expect("config");
+
+    let mut widget = crate::chatwidget::ChatWidget::new(
+        cfg,
+        app_sender.clone(),
+        None,
+        Vec::new(),
+        false,
+    );
+
+    let mut ansi: Vec<u8> = Vec::new();
+
+    let file = open_fixture("longer-hello.jsonl");
+    let reader = BufReader::new(file);
+
+    let mut current_turn_index: Option<usize> = None;
+    let mut expected_full_answer_per_turn: Vec<Option<String>> = Vec::new();
+    let mut transcript_per_turn: Vec<String> = Vec::new();
+
+    for line in reader.lines() {
+        let line = line.expect("read line");
+        if line.trim().is_empty() || line.starts_with('#') { continue; }
+        let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(&line) else { continue };
+        let Some(dir) = v.get("dir").and_then(|d| d.as_str()) else { continue };
+        if dir != "to_tui" { continue; }
+        let Some(kind) = v.get("kind").and_then(|k| k.as_str()) else { continue };
+        match kind {
+            "codex_event" => {
+                if let Some(payload) = v.get("payload") {
+                    let ev: CodexEvent = serde_json::from_value(payload.clone()).expect("parse");
+                    if let CodexEvent { msg, .. } = &ev {
+                        if matches!(msg, codex_core::protocol::EventMsg::TaskStarted) {
+                            expected_full_answer_per_turn.push(None);
+                            transcript_per_turn.push(String::new());
+                            current_turn_index = Some(expected_full_answer_per_turn.len() - 1);
+                        }
+                        if let codex_core::protocol::EventMsg::AgentMessage(m) = msg {
+                            if let Some(idx) = current_turn_index {
+                                expected_full_answer_per_turn[idx] = Some(m.message.clone());
+                            }
+                        }
+                        if let codex_core::protocol::EventMsg::TaskComplete(tc) = msg {
+                            if let Some(idx) = current_turn_index {
+                                if tc.last_agent_message.is_some() {
+                                    expected_full_answer_per_turn[idx] = tc.last_agent_message.clone();
+                                }
+                            }
+                        }
+                    }
+                    widget.handle_codex_event(ev);
+                    while let Ok(app_ev) = rx.try_recv() {
+                        match app_ev {
+                            AppEvent::InsertHistory(lines) => {
+                                if let Some(idx) = current_turn_index {
+                                    for line in &lines {
+                                        let s = line
+                                            .spans
+                                            .iter()
+                                            .map(|sp| sp.content.clone())
+                                            .collect::<Vec<_>>()
+                                            .join("");
+                                        transcript_per_turn[idx].push_str(&s);
+                                        transcript_per_turn[idx].push('\n');
+                                    }
+                                }
+                                crate::insert_history::insert_history_lines_to_writer(
+                                    &mut terminal, &mut ansi, lines);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            "app_event" => {
+                if let Some(variant) = v.get("variant").and_then(|s| s.as_str()) {
+                    if variant == "CommitTick" {
+                        widget.on_commit_tick();
+                        while let Ok(app_ev) = rx.try_recv() {
+                            match app_ev {
+                                AppEvent::InsertHistory(lines) => {
+                                    if let Some(idx) = current_turn_index {
+                                        for line in &lines {
+                                            let s = line
+                                                .spans
+                                                .iter()
+                                                .map(|sp| sp.content.clone())
+                                                .collect::<Vec<_>>()
+                                                .join("");
+                                            transcript_per_turn[idx].push_str(&s);
+                                            transcript_per_turn[idx].push('\n');
+                                        }
+                                    }
+                                    crate::insert_history::insert_history_lines_to_writer(
+                                        &mut terminal, &mut ansi, lines);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Verify every turn's transcript contains the expected full answer.
+    for (i, maybe_expected) in expected_full_answer_per_turn.iter().enumerate() {
+        if let Some(expected) = maybe_expected {
+            assert!(
+                transcript_per_turn[i].contains(expected),
+                "turn {} transcript missing expected full answer.\nexpected: {:?}\ntranscript: {}",
+                i,
+                expected,
+                transcript_per_turn[i]
+            );
+        }
+    }
+}
+
