@@ -133,7 +133,7 @@ pub(crate) enum HistoryCell {
     PatchApplyResult { view: TextBlock },
 }
 
-const TOOL_CALL_MAX_LINES: usize = 10;
+const TOOL_CALL_MAX_LINES: usize = 5;
 
 fn title_case(s: &str) -> String {
     if s.is_empty() {
@@ -228,7 +228,7 @@ impl HistoryCell {
         let mut more = Line::from(format!("… +{omitted} lines"));
         more.spans.insert(0, "    ".into());
         more.spans.iter_mut().for_each(|span| {
-            span.style = span.style.add_modifier(Modifier::DIM);
+            span.style = span.style;
         });
         out.push(more);
 
