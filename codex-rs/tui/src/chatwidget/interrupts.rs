@@ -30,8 +30,7 @@ impl InterruptManager {
     }
 
     pub(crate) fn push_exec_approval(&mut self, id: String, ev: ExecApprovalRequestEvent) {
-        self.queue
-            .push_back(QueuedInterrupt::ExecApproval(id, ev));
+        self.queue.push_back(QueuedInterrupt::ExecApproval(id, ev));
     }
 
     pub(crate) fn push_apply_patch_approval(
@@ -69,5 +68,3 @@ impl InterruptManager {
         }
     }
 }
-
-

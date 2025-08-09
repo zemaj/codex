@@ -1,4 +1,5 @@
-use crate::markdown_stream::{AnimatedLineStreamer, MarkdownStreamCollector};
+use crate::markdown_stream::AnimatedLineStreamer;
+use crate::markdown_stream::MarkdownStreamCollector;
 pub(crate) mod controller;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,7 +17,7 @@ impl StreamState {
     pub(crate) fn new() -> Self {
         Self {
             collector: MarkdownStreamCollector::new(),
-            streamer: AnimatedLineStreamer::new()
+            streamer: AnimatedLineStreamer::new(),
         }
     }
     pub(crate) fn clear(&mut self) {
@@ -114,5 +115,3 @@ fn render_header_line(kind: StreamKind) -> ratatui::text::Line<'static> {
         StreamKind::Answer => ratatui::text::Line::from("codex".magenta().bold()),
     }
 }
-
-

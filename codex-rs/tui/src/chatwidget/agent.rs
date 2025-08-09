@@ -4,7 +4,8 @@ use codex_core::codex_wrapper::CodexConversation;
 use codex_core::codex_wrapper::init_codex;
 use codex_core::config::Config;
 use codex_core::protocol::Op;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::unbounded_channel;
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
@@ -50,5 +51,3 @@ pub(crate) fn spawn_agent(config: Config, app_event_tx: AppEventSender) -> Unbou
 
     codex_op_tx
 }
-
-

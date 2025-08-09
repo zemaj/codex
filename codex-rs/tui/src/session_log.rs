@@ -46,7 +46,9 @@ impl SessionLogger {
     }
 
     fn write_json_line(&self, value: serde_json::Value) {
-        let Some(mutex) = self.file.get() else { return; };
+        let Some(mutex) = self.file.get() else {
+            return;
+        };
         let mut guard = match mutex.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),

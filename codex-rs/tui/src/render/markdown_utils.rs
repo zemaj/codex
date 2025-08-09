@@ -70,5 +70,3 @@ pub fn strip_empty_fenced_code_blocks(s: &str) -> String {
     }
     out
 }
-
-

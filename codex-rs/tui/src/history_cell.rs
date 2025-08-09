@@ -163,13 +163,11 @@ impl HistoryCell {
             | HistoryCell::PlanUpdate { view }
             | HistoryCell::PatchApplyResult { view }
             | HistoryCell::ActiveExecCommand { view, .. }
-            | HistoryCell::ActiveMcpToolCall { view, .. } => {
-                view
-                    .lines
-                    .iter()
-                    .map(crate::render::line_utils::line_to_static)
-                    .collect()
-            }
+            | HistoryCell::ActiveMcpToolCall { view, .. } => view
+                .lines
+                .iter()
+                .map(crate::render::line_utils::line_to_static)
+                .collect(),
             HistoryCell::CompletedMcpToolCallWithImageOutput { .. } => vec![
                 Line::from("tool result (image output omitted)"),
                 Line::from(""),

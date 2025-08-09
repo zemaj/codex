@@ -40,15 +40,15 @@ pub mod live_wrap;
 mod log_layer;
 mod markdown;
 mod markdown_stream;
-mod render;
-mod streaming;
-#[cfg(test)]
-mod test_utils;
 pub mod onboarding;
+mod render;
 mod session_log;
 mod shimmer;
 mod slash_command;
 mod status_indicator_widget;
+mod streaming;
+#[cfg(all(test, feature = "vt100-tests"))]
+mod test_utils;
 mod text_block;
 mod text_formatting;
 mod tui;

@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 use std::sync::mpsc::Receiver;
 
 use crate::app_event::AppEvent;
@@ -39,5 +37,3 @@ pub(crate) fn drain_insert_history<B: ratatui::backend::Backend>(
         }
     }
 }
-
-

@@ -1,4 +1,5 @@
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
+use ratatui::text::Span;
 
 /// Clone a borrowed ratatui `Line` into an owned `'static` line.
 pub fn line_to_static(line: &Line<'_>) -> Line<'static> {
@@ -42,5 +43,3 @@ pub fn is_blank_line_trim(line: &Line<'_>) -> bool {
     }
     line.spans.iter().all(|s| s.content.trim().is_empty())
 }
-
-

@@ -4,7 +4,8 @@ use codex_core::config::Config;
 use ratatui::text::Line;
 
 use crate::markdown;
-use crate::render::markdown_utils::{is_inside_unclosed_fence, strip_empty_fenced_code_blocks};
+use crate::render::markdown_utils::is_inside_unclosed_fence;
+use crate::render::markdown_utils::strip_empty_fenced_code_blocks;
 
 /// Newline-gated accumulator that renders markdown and commits only fully
 /// completed logical lines.
@@ -73,7 +74,9 @@ impl MarkdownStreamCollector {
 
         let mut complete_line_count = rendered.len();
         if complete_line_count > 0
-            && crate::render::line_utils::is_blank_line_spaces_only(&rendered[complete_line_count - 1])
+            && crate::render::line_utils::is_blank_line_spaces_only(
+                &rendered[complete_line_count - 1],
+            )
         {
             complete_line_count -= 1;
         }
@@ -130,8 +133,7 @@ impl MarkdownStreamCollector {
     }
 }
 
-/// fence helpers are provided by `crate::markdown_utils`
-
+/// fence helpers are provided by `crate::render::markdown_utils`
 #[cfg(test)]
 fn unwrap_markdown_language_fence_if_enabled(s: String) -> String {
     // In tests, keep content exactly as provided to simplify assertions.

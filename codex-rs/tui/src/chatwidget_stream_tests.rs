@@ -275,9 +275,13 @@ async fn vt100_replay_markdown_session_from_log() {
                             AppEvent::InsertHistory(lines) => {
                                 if let Some(idx) = current_turn_index {
                                     let texts = crate::test_utils::lines_to_plain_strings(&lines);
-                                    let turn_count = texts.iter().filter(|s| s.as_str() == "codex").count();
+                                    let turn_count =
+                                        texts.iter().filter(|s| s.as_str() == "codex").count();
                                     codex_headers_per_turn[idx] += turn_count;
-                                    crate::test_utils::append_lines_to_transcript(&lines, &mut transcript_per_turn[idx]);
+                                    crate::test_utils::append_lines_to_transcript(
+                                        &lines,
+                                        &mut transcript_per_turn[idx],
+                                    );
                                 }
                                 crate::insert_history::insert_history_lines_to_writer(
                                     &mut terminal,
@@ -299,10 +303,17 @@ async fn vt100_replay_markdown_session_from_log() {
                                 match app_ev {
                                     AppEvent::InsertHistory(lines) => {
                                         if let Some(idx) = current_turn_index {
-                                            let texts = crate::test_utils::lines_to_plain_strings(&lines);
-                                            let turn_count = texts.iter().filter(|s| s.as_str() == "codex").count();
+                                            let texts =
+                                                crate::test_utils::lines_to_plain_strings(&lines);
+                                            let turn_count = texts
+                                                .iter()
+                                                .filter(|s| s.as_str() == "codex")
+                                                .count();
                                             codex_headers_per_turn[idx] += turn_count;
-                                            crate::test_utils::append_lines_to_transcript(&lines, &mut transcript_per_turn[idx]);
+                                            crate::test_utils::append_lines_to_transcript(
+                                                &lines,
+                                                &mut transcript_per_turn[idx],
+                                            );
                                         }
                                         crate::insert_history::insert_history_lines_to_writer(
                                             &mut terminal,
@@ -453,7 +464,11 @@ async fn vt100_replay_longer_markdown_session_from_log() {
                                         if s == "codex" {
                                             turn_count += 1;
                                             saw_codex_header_in_turn[idx] = true;
-                                            if texts.iter().skip(i + 1).any(|t| !t.trim().is_empty()) {
+                                            if texts
+                                                .iter()
+                                                .skip(i + 1)
+                                                .any(|t| !t.trim().is_empty())
+                                            {
                                                 header_batched_with_content[idx] = true;
                                             }
                                         } else if saw_codex_header_in_turn[idx]
@@ -485,13 +500,18 @@ async fn vt100_replay_longer_markdown_session_from_log() {
                                 match app_ev {
                                     AppEvent::InsertHistory(lines) => {
                                         if let Some(idx) = current_turn_index {
-                        let texts = crate::test_utils::lines_to_plain_strings(&lines);
+                                            let texts =
+                                                crate::test_utils::lines_to_plain_strings(&lines);
                                             let mut turn_count = 0usize;
                                             for (i, s) in texts.iter().enumerate() {
                                                 if s == "codex" {
                                                     turn_count += 1;
                                                     saw_codex_header_in_turn[idx] = true;
-                                                    if texts.iter().skip(i + 1).any(|t| !t.trim().is_empty()) {
+                                                    if texts
+                                                        .iter()
+                                                        .skip(i + 1)
+                                                        .any(|t| !t.trim().is_empty())
+                                                    {
                                                         header_batched_with_content[idx] = true;
                                                     }
                                                 } else if saw_codex_header_in_turn[idx]
@@ -638,7 +658,10 @@ async fn vt100_replay_longer_hello_session_from_log() {
                         match app_ev {
                             AppEvent::InsertHistory(lines) => {
                                 if let Some(idx) = current_turn_index {
-                                    crate::test_utils::append_lines_to_transcript(&lines, &mut transcript_per_turn[idx]);
+                                    crate::test_utils::append_lines_to_transcript(
+                                        &lines,
+                                        &mut transcript_per_turn[idx],
+                                    );
                                 }
                                 crate::insert_history::insert_history_lines_to_writer(
                                     &mut terminal,
@@ -659,7 +682,10 @@ async fn vt100_replay_longer_hello_session_from_log() {
                             match app_ev {
                                 AppEvent::InsertHistory(lines) => {
                                     if let Some(idx) = current_turn_index {
-                                            crate::test_utils::append_lines_to_transcript(&lines, &mut transcript_per_turn[idx]);
+                                        crate::test_utils::append_lines_to_transcript(
+                                            &lines,
+                                            &mut transcript_per_turn[idx],
+                                        );
                                     }
                                     crate::insert_history::insert_history_lines_to_writer(
                                         &mut terminal,

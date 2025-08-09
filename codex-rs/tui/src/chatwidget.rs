@@ -53,8 +53,9 @@ mod interrupts;
 use self::interrupts::InterruptManager;
 mod agent;
 use self::agent::spawn_agent;
+use crate::streaming::controller::AppEventHistorySink;
+use crate::streaming::controller::StreamController;
 use codex_file_search::FileMatch;
-use crate::streaming::controller::{AppEventHistorySink, StreamController};
 
 // Simplified: track only the command arguments for running exec calls.
 
@@ -69,7 +70,7 @@ pub(crate) struct ChatWidget<'a> {
     last_token_usage: TokenUsage,
     // Stream lifecycle controller
     stream: StreamController,
-    running_commands: HashMap<String, Vec<String>>, 
+    running_commands: HashMap<String, Vec<String>>,
     task_complete_pending: bool,
     // Queue of interruptive UI events deferred during an active write cycle
     interrupts: InterruptManager,
@@ -291,7 +292,11 @@ impl ChatWidget<'_> {
         &mut self,
         event: codex_core::protocol::GetHistoryEntryResponseEvent,
     ) {
-        let codex_core::protocol::GetHistoryEntryResponseEvent { offset, log_id, entry } = event;
+        let codex_core::protocol::GetHistoryEntryResponseEvent {
+            offset,
+            log_id,
+            entry,
+        } = event;
         self.bottom_pane
             .on_history_entry_response(log_id, offset, entry.map(|e| e.text));
     }
@@ -525,16 +530,14 @@ impl ChatWidget<'_> {
         let Event { id, msg } = event;
         match msg {
             EventMsg::SessionConfigured(e) => self.on_session_configured(e),
-            EventMsg::AgentMessage(AgentMessageEvent { message }) => {
-                self.on_agent_message(message)
-            }
+            EventMsg::AgentMessage(AgentMessageEvent { message }) => self.on_agent_message(message),
             EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }) => {
                 self.on_agent_message_delta(delta)
             }
             EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta })
-            | EventMsg::AgentReasoningRawContentDelta(AgentReasoningRawContentDeltaEvent { delta }) => {
-                self.on_agent_reasoning_delta(delta)
-            }
+            | EventMsg::AgentReasoningRawContentDelta(AgentReasoningRawContentDeltaEvent {
+                delta,
+            }) => self.on_agent_reasoning_delta(delta),
             EventMsg::AgentReasoning(AgentReasoningEvent { .. })
             | EventMsg::AgentReasoningRawContent(AgentReasoningRawContentEvent { .. }) => {
                 self.on_agent_reasoning_final()
@@ -822,6 +825,7 @@ mod chatwidget_helper_tests {
             running_commands: HashMap::new(),
             task_complete_pending: false,
             interrupts: InterruptManager::new(),
+            needs_redraw: false,
         };
         (widget, rx, op_rx)
     }

@@ -1,7 +1,9 @@
 use codex_core::config::Config;
 use ratatui::text::Line;
 
-use super::{HeaderEmitter, StreamKind, StreamState};
+use super::HeaderEmitter;
+use super::StreamKind;
+use super::StreamState;
 
 /// Sink for history insertions and animation control.
 pub(crate) trait HistorySink {
@@ -15,10 +17,12 @@ pub(crate) struct AppEventHistorySink(pub(crate) crate::app_event_sender::AppEve
 
 impl HistorySink for AppEventHistorySink {
     fn insert_history(&self, lines: Vec<Line<'static>>) {
-        self.0.send(crate::app_event::AppEvent::InsertHistory(lines))
+        self.0
+            .send(crate::app_event::AppEvent::InsertHistory(lines))
     }
     fn start_commit_animation(&self) {
-        self.0.send(crate::app_event::AppEvent::StartCommitAnimation)
+        self.0
+            .send(crate::app_event::AppEvent::StartCommitAnimation)
     }
     fn stop_commit_animation(&self) {
         self.0.send(crate::app_event::AppEvent::StopCommitAnimation)
@@ -71,7 +75,9 @@ impl StreamController {
     }
 
     #[inline]
-    fn idx(kind: StreamKind) -> usize { kind as usize }
+    fn idx(kind: StreamKind) -> usize {
+        kind as usize
+    }
     fn state(&self, kind: StreamKind) -> &StreamState {
         &self.states[Self::idx(kind)]
     }
@@ -79,11 +85,7 @@ impl StreamController {
         &mut self.states[Self::idx(kind)]
     }
 
-    fn emit_header_if_needed(
-        &mut self,
-        kind: StreamKind,
-        out_lines: &mut Lines,
-    ) -> bool {
+    fn emit_header_if_needed(&mut self, kind: StreamKind, out_lines: &mut Lines) -> bool {
         self.header.maybe_emit(kind, out_lines)
     }
 
@@ -141,7 +143,9 @@ impl StreamController {
 
     /// Push a delta; if it contains a newline, commit completed lines and start animation.
     pub(crate) fn push_and_maybe_commit(&mut self, delta: &str, sink: &impl HistorySink) {
-        let Some(kind) = self.current_stream else { return; };
+        let Some(kind) = self.current_stream else {
+            return;
+        };
         let cfg = self.config.clone();
         let state = self.state_mut(kind);
         state.collector.push_delta(delta);
@@ -203,7 +207,7 @@ impl StreamController {
             self.state_mut(kind).clear();
             self.current_stream = None;
             self.finishing_after_drain = false;
-            return true;
+            true
         } else {
             if !remaining.is_empty() {
                 let state = self.state_mut(kind);
@@ -213,16 +217,15 @@ impl StreamController {
             self.state_mut(kind).enqueue(vec![Line::from("")]);
             self.finishing_after_drain = true;
             sink.start_commit_animation();
-            return false;
+            false
         }
     }
 
     /// Step animation: commit at most one queued line and handle end-of-drain cleanup.
-    pub(crate) fn on_commit_tick(
-        &mut self,
-        sink: &impl HistorySink,
-    ) -> bool {
-        let Some(kind) = self.current_stream else { return false; };
+    pub(crate) fn on_commit_tick(&mut self, sink: &impl HistorySink) -> bool {
+        let Some(kind) = self.current_stream else {
+            return false;
+        };
         let mut lines: Lines = Vec::new();
         self.emit_header_if_needed(kind, &mut lines);
 
@@ -267,11 +270,7 @@ impl StreamController {
 
     /// Apply a full final answer: replace queued content with only the remaining tail,
     /// then finalize immediately and notify completion.
-    pub(crate) fn apply_final_answer(
-        &mut self,
-        message: &str,
-        sink: &impl HistorySink,
-    ) -> bool {
+    pub(crate) fn apply_final_answer(&mut self, message: &str, sink: &impl HistorySink) -> bool {
         self.begin(StreamKind::Answer, sink);
         if !message.is_empty() {
             let mut rendered_final: Lines = Vec::new();
@@ -280,7 +279,8 @@ impl StreamController {
                 msg_with_nl.push('\n');
             }
             crate::markdown::append_markdown(&msg_with_nl, &mut rendered_final, &self.config);
-            let remaining = self.compute_remaining_final_lines_for_kind(StreamKind::Answer, &rendered_final);
+            let remaining =
+                self.compute_remaining_final_lines_for_kind(StreamKind::Answer, &rendered_final);
             let state = self.state_mut(StreamKind::Answer);
             state.streamer.clear();
             if !remaining.is_empty() {
@@ -293,5 +293,3 @@ impl StreamController {
         self.finalize(StreamKind::Answer, true, sink)
     }
 }
-
-
