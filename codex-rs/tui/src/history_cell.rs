@@ -1280,16 +1280,3 @@ fn format_mcp_invocation<'a>(invocation: McpInvocation) -> Line<'a> {
     ];
     Line::from(invocation_spans)
 }
-
-fn formatted_list_str(items: Vec<String>) -> String {
-    match items.len() {
-        0 => "".to_string(),
-        1 => items[0].clone(),
-        2 => format!("{} and {}", items[0], items[1]),
-        _ => {
-            let mut items = items.clone();
-            let last = items.pop().unwrap_or_default();
-            format!("{}, and {}", items.join(", "), last)
-        }
-    }
-}
