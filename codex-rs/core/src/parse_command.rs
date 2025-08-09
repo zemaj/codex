@@ -216,6 +216,19 @@ fn skip_flag_values<'a>(args: &'a [String], flags_with_vals: &[&str]) -> Vec<&'a
     out
 }
 
+/// Common flags for ESLint that take a following value and should not be
+/// considered positional targets.
+const ESLINT_FLAGS_WITH_VALUES: &[&str] = &[
+    "-c",
+    "--config",
+    "--parser",
+    "--parser-options",
+    "--rulesdir",
+    "--plugin",
+    "--max-warnings",
+    "--format",
+];
+
 fn collect_non_flag_targets(args: &[String]) -> Option<Vec<String>> {
     let mut targets = Vec::new();
     let mut skip_next = false;
@@ -260,15 +273,16 @@ fn collect_non_flag_targets_with_flags(
     args: &[String],
     flags_with_vals: &[&str],
 ) -> Option<Vec<String>> {
-    let candidates = skip_flag_values(args, flags_with_vals);
-    let mut targets: Vec<String> = Vec::new();
-    for a in candidates {
-        if a.starts_with('-') {
-            continue;
-        }
-        targets.push(a.clone());
+    let targets: Vec<String> = skip_flag_values(args, flags_with_vals)
+        .into_iter()
+        .filter(|a| !a.starts_with('-'))
+        .cloned()
+        .collect();
+    if targets.is_empty() {
+        None
+    } else {
+        Some(targets)
     }
-    if targets.is_empty() { None } else { Some(targets) }
 }
 
 fn parse_cargo_test_filter(args: &[String]) -> Option<Vec<String>> {
@@ -389,6 +403,51 @@ fn is_pathish(s: &str) -> bool {
         || s.starts_with("../")
         || s.contains('/')
         || s.contains('\\')
+}
+
+fn parse_fd_query_and_path(tail: &[String]) -> (Option<String>, Option<String>) {
+    let args_no_connector = trim_at_connector(tail);
+    let non_flags: Vec<&String> = args_no_connector
+        .iter()
+        .filter(|p| !p.starts_with('-'))
+        .collect();
+    match non_flags.as_slice() {
+        [one] => {
+            if is_pathish(one) {
+                (None, Some(short_display_path(one)))
+            } else {
+                (Some((*one).clone()), None)
+            }
+        }
+        [q, p, ..] => (Some((*q).clone()), Some(short_display_path(p))),
+        _ => (None, None),
+    }
+}
+
+fn parse_find_query_and_path(tail: &[String]) -> (Option<String>, Option<String>) {
+    let args_no_connector = trim_at_connector(tail);
+    // First positional argument (excluding common unary operators) is the root path
+    let mut path: Option<String> = None;
+    for a in &args_no_connector {
+        if !a.starts_with('-') && *a != "!" && *a != "(" && *a != ")" {
+            path = Some(short_display_path(a));
+            break;
+        }
+    }
+    // Extract a common name/path/regex pattern if present
+    let mut query: Option<String> = None;
+    let mut i = 0;
+    while i < args_no_connector.len() {
+        let a = &args_no_connector[i];
+        if a == "-name" || a == "-iname" || a == "-path" || a == "-regex" {
+            if i + 1 < args_no_connector.len() {
+                query = Some(args_no_connector[i + 1].clone());
+            }
+            break;
+        }
+        i += 1;
+    }
+    (query, path)
 }
 
 fn classify_npm_like(tool: &str, tail: &[String], full_cmd: &[String]) -> Option<ParsedCommand> {
@@ -690,10 +749,7 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
         },
         Some((head, tail)) if head == "eslint" => {
             // Treat configuration flags with values (e.g. `-c .eslintrc`) as non-targets.
-            let targets = collect_non_flag_targets_with_flags(
-                tail,
-                &["-c", "--config", "--parser", "--parser-options", "--rulesdir", "--plugin"],
-            );
+            let targets = collect_non_flag_targets_with_flags(tail, ESLINT_FLAGS_WITH_VALUES);
             ParsedCommand::Lint {
                 cmd: main_cmd.to_vec(),
                 tool: Some("eslint".to_string()),
@@ -736,10 +792,7 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
         Some((head, tail))
             if head == "npx" && tail.first().map(|s| s.as_str()) == Some("eslint") =>
         {
-            let targets = collect_non_flag_targets_with_flags(
-                &tail[1..],
-                &["-c", "--config", "--parser", "--parser-options", "--rulesdir", "--plugin"],
-            );
+            let targets = collect_non_flag_targets_with_flags(&tail[1..], ESLINT_FLAGS_WITH_VALUES);
             ParsedCommand::Lint {
                 cmd: main_cmd.to_vec(),
                 tool: Some("eslint".to_string()),
@@ -812,22 +865,7 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
         }
         Some((head, tail)) if head == "fd" => {
             // fd is a file finder; treat results as files_only
-            let args_no_connector = trim_at_connector(tail);
-            let non_flags: Vec<&String> = args_no_connector
-                .iter()
-                .filter(|p| !p.starts_with('-'))
-                .collect();
-            let (query, path) = match non_flags.as_slice() {
-                [one] => {
-                    if is_pathish(one) {
-                        (None, Some(short_display_path(one)))
-                    } else {
-                        (Some((*one).clone()), None)
-                    }
-                }
-                [q, p, ..] => (Some((*q).clone()), Some(short_display_path(p))),
-                _ => (None, None),
-            };
+            let (query, path) = parse_fd_query_and_path(tail);
             ParsedCommand::Search {
                 cmd: main_cmd.to_vec(),
                 query,
@@ -837,28 +875,7 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
         }
         Some((head, tail)) if head == "find" => {
             // Basic find support: capture path and common name filter
-            let args_no_connector = trim_at_connector(tail);
-            let mut path: Option<String> = None;
-            // first positional arg is the search root
-            for a in &args_no_connector {
-                if !a.starts_with('-') && *a != "!" && *a != "(" && *a != ")" {
-                    path = Some(short_display_path(a));
-                    break;
-                }
-            }
-            // extract -name/-iname pattern if present
-            let mut query: Option<String> = None;
-            let mut i = 0;
-            while i < args_no_connector.len() {
-                let a = &args_no_connector[i];
-                if a == "-name" || a == "-iname" || a == "-path" || a == "-regex" {
-                    if i + 1 < args_no_connector.len() {
-                        query = Some(args_no_connector[i + 1].clone());
-                        break;
-                    }
-                }
-                i += 1;
-            }
+            let (query, path) = parse_find_query_and_path(tail);
             ParsedCommand::Search {
                 cmd: main_cmd.to_vec(),
                 query,

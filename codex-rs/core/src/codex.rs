@@ -374,7 +374,7 @@ impl Session {
         }
     }
 
-    pub async fn on_exec_command_begin(
+    async fn on_exec_command_begin(
         &self,
         turn_diff_tracker: &mut TurnDiffTracker,
         exec_command_context: ExecCommandContext,

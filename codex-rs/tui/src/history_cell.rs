@@ -291,38 +291,32 @@ impl HistoryCell {
         parsed: &[ParsedCommand],
         output: Option<&CommandOutput>,
     ) -> Vec<Line<'static>> {
-        let is_read_command = parsed
-            .iter()
-            .all(|c| matches!(c, ParsedCommand::Read { .. }));
+        let all = |pred: fn(&ParsedCommand) -> bool| -> bool {
+            !parsed.is_empty() && parsed.iter().all(&pred)
+        };
 
-        let is_list_command = parsed.iter().all(|c| matches!(c, ParsedCommand::Ls { .. }));
-        let is_search_command = parsed
-            .iter()
-            .all(|c| matches!(c, ParsedCommand::Search { .. }));
-        let is_format_command = parsed
-            .iter()
-            .all(|c| matches!(c, ParsedCommand::Format { .. }));
-        let is_lint_command = parsed
-            .iter()
-            .all(|c| matches!(c, ParsedCommand::Lint { .. }));
-        let is_test_command = parsed
-            .iter()
-            .all(|c| matches!(c, ParsedCommand::Test { .. }));
-
-        if is_read_command {
-            return HistoryCell::new_read_command(parsed, output);
-        } else if is_list_command {
-            return HistoryCell::new_list_command(parsed, output);
-        } else if is_search_command {
-            return HistoryCell::new_search_command(parsed, output);
-        } else if is_format_command {
-            return HistoryCell::new_format_command(parsed, output);
-        } else if is_lint_command {
-            return HistoryCell::new_lint_command(parsed, output);
-        } else if is_test_command {
-            return HistoryCell::new_test_command(parsed, output);
+        // Only render a typed cell if all of the parsed commands are of the same type.
+        match () {
+            _ if all(|c| matches!(c, ParsedCommand::Read { .. })) => {
+                HistoryCell::new_read_command(parsed, output)
+            }
+            _ if all(|c| matches!(c, ParsedCommand::Ls { .. })) => {
+                HistoryCell::new_list_command(parsed, output)
+            }
+            _ if all(|c| matches!(c, ParsedCommand::Search { .. })) => {
+                HistoryCell::new_search_command(parsed, output)
+            }
+            _ if all(|c| matches!(c, ParsedCommand::Format { .. })) => {
+                HistoryCell::new_format_command(parsed, output)
+            }
+            _ if all(|c| matches!(c, ParsedCommand::Lint { .. })) => {
+                HistoryCell::new_lint_command(parsed, output)
+            }
+            _ if all(|c| matches!(c, ParsedCommand::Test { .. })) => {
+                HistoryCell::new_test_command(parsed, output)
+            }
+            _ => HistoryCell::new_exec_command_generic(command, output),
         }
-        HistoryCell::new_exec_command_generic(command, output)
     }
 
     fn new_read_command(
