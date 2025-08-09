@@ -1,4 +1,5 @@
 use crate::markdown_stream::{AnimatedLineStreamer, MarkdownStreamCollector};
+pub(crate) mod controller;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamKind {
