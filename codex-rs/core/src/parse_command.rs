@@ -87,29 +87,30 @@ mod tests {
         assert_parsed(
             &vec_str(&["bash", "-lc", inner]),
             vec![
-                ParsedCommand::Unknown {
-                    cmd: vec_str(&["head", "-n", "40"]),
-                },
-                ParsedCommand::Search {
-                    cmd: vec_str(&["rg", "--files"]),
-                    query: None,
-                    path: None,
-                },
-                ParsedCommand::Search {
-                    cmd: vec_str(&["rg", "--files"]),
-                    query: None,
-                    path: None,
-                },
-                ParsedCommand::Unknown {
-                    cmd: vec_str(&["pnpm", "-v"]),
-                },
-                ParsedCommand::Unknown {
-                    cmd: vec_str(&["node", "-v"]),
-                },
+                // Expect commands in left-to-right execution order
                 ParsedCommand::Search {
                     cmd: vec_str(&["rg", "--version"]),
                     query: None,
                     path: None,
+                },
+                ParsedCommand::Unknown {
+                    cmd: vec_str(&["node", "-v"]),
+                },
+                ParsedCommand::Unknown {
+                    cmd: vec_str(&["pnpm", "-v"]),
+                },
+                ParsedCommand::Search {
+                    cmd: vec_str(&["rg", "--files"]),
+                    query: None,
+                    path: None,
+                },
+                ParsedCommand::Search {
+                    cmd: vec_str(&["rg", "--files"]),
+                    query: None,
+                    path: None,
+                },
+                ParsedCommand::Unknown {
+                    cmd: vec_str(&["head", "-n", "40"]),
                 },
             ],
         );
@@ -135,13 +136,13 @@ mod tests {
         assert_parsed(
             &vec_str(&["bash", "-lc", inner]),
             vec![
-                ParsedCommand::Unknown {
-                    cmd: vec_str(&["head", "-n", "200"]),
-                },
                 ParsedCommand::Search {
                     cmd: vec_str(&["rg", "-n", "BUG|FIXME|TODO|XXX|HACK", "-S"]),
                     query: Some("BUG|FIXME|TODO|XXX|HACK".to_string()),
                     path: None,
+                },
+                ParsedCommand::Unknown {
+                    cmd: vec_str(&["head", "-n", "200"]),
                 },
             ],
         );
@@ -166,13 +167,13 @@ mod tests {
         assert_parsed(
             &vec_str(&["bash", "-lc", inner]),
             vec![
-                ParsedCommand::Unknown {
-                    cmd: vec_str(&["head", "-n", "50"]),
-                },
                 ParsedCommand::Search {
                     cmd: vec_str(&["rg", "--files"]),
                     query: None,
                     path: None,
+                },
+                ParsedCommand::Unknown {
+                    cmd: vec_str(&["head", "-n", "50"]),
                 },
             ],
         );
@@ -1103,19 +1104,14 @@ pub fn parse_command_impl(command: &[String]) -> Vec<ParsedCommand> {
         return commands;
     }
 
-    let mut parts = if contains_connectors(&normalized) {
+    let parts = if contains_connectors(&normalized) {
         split_on_connectors(&normalized)
     } else {
         vec![normalized.clone()]
     };
 
-    // When normalized from `bash -c`, prefer showing pipeline segments from right-to-left
-    // to better surface the formatting step first, matching expectations in tests.
-    if let [bash, flag, _script] = command {
-        if bash == "bash" && flag == "-c" && normalized.iter().any(|t| t == "|") {
-            parts.reverse();
-        }
-    }
+    // Preserve left-to-right execution order for all commands, including bash -c/-lc
+    // so summaries reflect the order they will run.
 
     // Map each pipeline segment to its parsed summary.
     let mut parsed: Vec<ParsedCommand> = parts
@@ -1480,7 +1476,10 @@ fn parse_bash_lc_commands(
                 // bias toward the primary command when pipelines are present.
                 // First, drop obvious small formatting helpers (e.g., wc/awk/etc).
                 let had_multiple_commands = all_commands.len() > 1;
-                let filtered_commands = drop_small_formatting_commands(all_commands);
+                // The bash AST walker yields commands in right-to-left order for
+                // connector/pipeline sequences. Reverse to reflect actual execution order.
+                let mut filtered_commands = drop_small_formatting_commands(all_commands);
+                filtered_commands.reverse();
                 if filtered_commands.is_empty() {
                     return Some(vec![ParsedCommand::Unknown {
                         cmd: normalized.to_vec(),
@@ -1786,12 +1785,19 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
         }
         Some((head, tail)) if head == "rg" => {
             let args_no_connector = trim_at_connector(tail);
+            let has_files_flag = args_no_connector.iter().any(|a| a == "--files");
             let non_flags: Vec<&String> = args_no_connector
                 .iter()
                 .filter(|p| !p.starts_with('-'))
                 .collect();
-            let query = non_flags.first().cloned().map(|s| s.to_string());
-            let path = non_flags.get(1).map(|s| short_display_path(s));
+            let (query, path) = if has_files_flag {
+                (None, non_flags.first().map(|s| short_display_path(s)))
+            } else {
+                (
+                    non_flags.first().cloned().map(|s| s.to_string()),
+                    non_flags.get(1).map(|s| short_display_path(s)),
+                )
+            };
             ParsedCommand::Search {
                 cmd: main_cmd.to_vec(),
                 query,
