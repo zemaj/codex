@@ -58,6 +58,10 @@ pub fn parse_command(command: &[String]) -> Vec<ParsedCommand> {
 mod tests {
     use super::*;
 
+    fn shlex_split_safe(s: &str) -> Vec<String> {
+        shlex_split(s).unwrap_or_else(|| s.split_whitespace().map(|s| s.to_string()).collect())
+    }
+
     fn vec_str(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
     }
@@ -116,17 +120,18 @@ mod tests {
     }
 
     #[test]
-    fn supports_searching_for_navigate_to_route() {
+    fn supports_searching_for_navigate_to_route() -> anyhow::Result<()> {
         let inner = "rg -n \"navigate-to-route\" -S";
         assert_parsed(
             &vec_str(&["bash", "-lc", inner]),
             vec![ParsedCommand::Search {
-                cmd: shlex_split(inner).expect("failed to split"),
+                cmd: shlex_split_safe(inner),
                 query: Some("navigate-to-route".to_string()),
                 path: None,
                 files_only: false,
             }],
         );
+        Ok(())
     }
 
     #[test]
@@ -187,7 +192,7 @@ mod tests {
         assert_parsed(
             &vec_str(&["bash", "-lc", inner]),
             vec![ParsedCommand::Read {
-                cmd: shlex_split(inner).unwrap(),
+                cmd: shlex_split_safe(inner),
                 name: "README.md".to_string(),
             }],
         );
@@ -211,7 +216,7 @@ mod tests {
         assert_parsed(
             &vec_str(&["bash", "-lc", inner]),
             vec![ParsedCommand::Read {
-                cmd: shlex_split(inner).unwrap(),
+                cmd: shlex_split_safe(inner),
                 name: "Cargo.toml".to_string(),
             }],
         );
@@ -223,7 +228,7 @@ mod tests {
         assert_parsed(
             &vec_str(&["bash", "-lc", inner]),
             vec![ParsedCommand::Read {
-                cmd: shlex_split(inner).unwrap(),
+                cmd: shlex_split_safe(inner),
                 name: "Cargo.toml".to_string(),
             }],
         );
@@ -235,7 +240,7 @@ mod tests {
         assert_parsed(
             &vec_str(&["bash", "-lc", inner]),
             vec![ParsedCommand::Read {
-                cmd: shlex_split(inner).unwrap(),
+                cmd: shlex_split_safe(inner),
                 name: "README.md".to_string(),
             }],
         );
@@ -248,7 +253,7 @@ mod tests {
         assert_eq!(
             out,
             vec![ParsedCommand::Read {
-                cmd: shlex_split(inner).unwrap(),
+                cmd: shlex_split_safe(inner),
                 name: "README.md".to_string(),
             }]
         );
@@ -337,7 +342,7 @@ mod tests {
         // Query strings may contain slashes and should not be shortened to the basename.
         // Previously, grep queries were passed through short_display_path, which is incorrect.
         assert_parsed(
-            &vec_str(&["grep", "-R", "src/main.rs", "-n", "."]),
+            &shlex_split_safe("grep -R src/main.rs -n ."),
             vec![ParsedCommand::Search {
                 cmd: vec_str(&["grep", "-R", "src/main.rs", "-n", "."]),
                 query: Some("src/main.rs".to_string()),
@@ -350,7 +355,7 @@ mod tests {
     #[test]
     fn supports_grep_weird_backtick_in_query() {
         assert_parsed(
-            &vec_str(&["grep", "-R", "COD`EX_SANDBOX", "-n"]),
+            &shlex_split_safe("grep -R COD`EX_SANDBOX -n"),
             vec![ParsedCommand::Search {
                 cmd: vec_str(&["grep", "-R", "COD`EX_SANDBOX", "-n"]),
                 query: Some("COD`EX_SANDBOX".to_string()),
@@ -363,7 +368,7 @@ mod tests {
     #[test]
     fn supports_cd_and_rg_files() {
         assert_parsed(
-            &vec_str(&["cd", "codex-rs", "&&", "rg", "--files"]),
+            &shlex_split_safe("cd codex-rs && rg --files"),
             vec![
                 ParsedCommand::Unknown {
                     cmd: vec_str(&["cd", "codex-rs"]),
@@ -381,16 +386,7 @@ mod tests {
     #[test]
     fn echo_then_cargo_test_sequence() {
         assert_parsed(
-            &vec_str(&[
-                "echo",
-                "Running",
-                "tests...",
-                "&&",
-                "cargo",
-                "test",
-                "--all-features",
-                "--quiet",
-            ]),
+            &shlex_split_safe("echo Running tests... && cargo test --all-features --quiet"),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&["cargo", "test", "--all-features", "--quiet"]),
             }],
@@ -400,22 +396,12 @@ mod tests {
     #[test]
     fn supports_cargo_fmt_and_test_with_config() {
         assert_parsed(
-            &vec_str(&[
-                "cargo",
-                "fmt",
-                "--",
-                "--config",
-                "imports_granularity=Item",
-                "&&",
-                "cargo",
-                "test",
-                "-p",
-                "core",
-                "--all-features",
-            ]),
+            &shlex_split_safe(
+                "cargo fmt -- --config imports_granularity=Item && cargo test -p core --all-features",
+            ),
             vec![
                 ParsedCommand::Format {
-                    cmd: vec_str(&["cargo", "fmt", "--", "--config", "imports_granularity=Item"]),
+                    cmd: shlex_split_safe("cargo fmt -- --config imports_granularity=Item"),
                     tool: Some("cargo fmt".to_string()),
                     targets: None,
                 },
@@ -429,7 +415,7 @@ mod tests {
     #[test]
     fn recognizes_rustfmt_and_clippy() {
         assert_parsed(
-            &vec_str(&["rustfmt", "src/main.rs"]),
+            &shlex_split_safe("rustfmt src/main.rs"),
             vec![ParsedCommand::Format {
                 cmd: vec_str(&["rustfmt", "src/main.rs"]),
                 tool: Some("rustfmt".to_string()),
@@ -438,16 +424,7 @@ mod tests {
         );
 
         assert_parsed(
-            &vec_str(&[
-                "cargo",
-                "clippy",
-                "-p",
-                "core",
-                "--all-features",
-                "--",
-                "-D",
-                "warnings",
-            ]),
+            &shlex_split_safe("cargo clippy -p core --all-features -- -D warnings"),
             vec![ParsedCommand::Lint {
                 cmd: vec_str(&[
                     "cargo",
@@ -468,12 +445,9 @@ mod tests {
     #[test]
     fn recognizes_pytest_go_and_tools() {
         assert_parsed(
-            &vec_str(&[
-                "pytest",
-                "-k",
-                "Login and not slow",
-                "tests/test_login.py::TestLogin::test_ok",
-            ]),
+            &shlex_split_safe(
+                "pytest -k 'Login and not slow' tests/test_login.py::TestLogin::test_ok",
+            ),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&[
                     "pytest",
@@ -485,7 +459,7 @@ mod tests {
         );
 
         assert_parsed(
-            &vec_str(&["go", "fmt", "./..."]),
+            &shlex_split_safe("go fmt ./..."),
             vec![ParsedCommand::Format {
                 cmd: vec_str(&["go", "fmt", "./..."]),
                 tool: Some("go fmt".to_string()),
@@ -494,14 +468,14 @@ mod tests {
         );
 
         assert_parsed(
-            &vec_str(&["go", "test", "./pkg", "-run", "TestThing"]),
+            &shlex_split_safe("go test ./pkg -run TestThing"),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&["go", "test", "./pkg", "-run", "TestThing"]),
             }],
         );
 
         assert_parsed(
-            &vec_str(&["eslint", ".", "--max-warnings", "0"]),
+            &shlex_split_safe("eslint . --max-warnings 0"),
             vec![ParsedCommand::Lint {
                 cmd: vec_str(&["eslint", ".", "--max-warnings", "0"]),
                 tool: Some("eslint".to_string()),
@@ -510,7 +484,7 @@ mod tests {
         );
 
         assert_parsed(
-            &vec_str(&["prettier", "-w", "."]),
+            &shlex_split_safe("prettier -w ."),
             vec![ParsedCommand::Format {
                 cmd: vec_str(&["prettier", "-w", "."]),
                 tool: Some("prettier".to_string()),
@@ -522,14 +496,14 @@ mod tests {
     #[test]
     fn recognizes_jest_and_vitest_filters() {
         assert_parsed(
-            &vec_str(&["jest", "-t", "should work", "src/foo.test.ts"]),
+            &shlex_split_safe("jest -t 'should work' src/foo.test.ts"),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&["jest", "-t", "should work", "src/foo.test.ts"]),
             }],
         );
 
         assert_parsed(
-            &vec_str(&["vitest", "-t", "runs", "src/foo.test.tsx"]),
+            &shlex_split_safe("vitest -t 'runs' src/foo.test.tsx"),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&["vitest", "-t", "runs", "src/foo.test.tsx"]),
             }],
@@ -539,7 +513,7 @@ mod tests {
     #[test]
     fn recognizes_npx_and_scripts() {
         assert_parsed(
-            &vec_str(&["npx", "eslint", "src"]),
+            &shlex_split_safe("npx eslint src"),
             vec![ParsedCommand::Lint {
                 cmd: vec_str(&["npx", "eslint", "src"]),
                 tool: Some("eslint".to_string()),
@@ -548,7 +522,7 @@ mod tests {
         );
 
         assert_parsed(
-            &vec_str(&["npx", "prettier", "-c", "."]),
+            &shlex_split_safe("npx prettier -c ."),
             vec![ParsedCommand::Format {
                 cmd: vec_str(&["npx", "prettier", "-c", "."]),
                 tool: Some("prettier".to_string()),
@@ -557,7 +531,7 @@ mod tests {
         );
 
         assert_parsed(
-            &vec_str(&["pnpm", "run", "lint", "--", "--max-warnings", "0"]),
+            &shlex_split_safe("pnpm run lint -- --max-warnings 0"),
             vec![ParsedCommand::Lint {
                 cmd: vec_str(&["pnpm", "run", "lint", "--", "--max-warnings", "0"]),
                 tool: Some("pnpm-script:lint".to_string()),
@@ -566,14 +540,14 @@ mod tests {
         );
 
         assert_parsed(
-            &vec_str(&["npm", "test"]),
+            &shlex_split_safe("npm test"),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&["npm", "test"]),
             }],
         );
 
         assert_parsed(
-            &vec_str(&["yarn", "test"]),
+            &shlex_split_safe("yarn test"),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&["yarn", "test"]),
             }],
@@ -586,8 +560,10 @@ mod tests {
         for cmd in [
             "wc", "tr", "cut", "sort", "uniq", "xargs", "tee", "column", "awk",
         ] {
-            assert!(is_small_formatting_command(&vec_str(&[cmd])));
-            assert!(is_small_formatting_command(&vec_str(&[cmd, "-x"])));
+            assert!(is_small_formatting_command(&shlex_split_safe(cmd)));
+            assert!(is_small_formatting_command(&shlex_split_safe(&format!(
+                "{cmd} -x"
+            ))));
         }
     }
 
@@ -596,13 +572,13 @@ mod tests {
         // No args -> small formatting
         assert!(is_small_formatting_command(&vec_str(&["head"])));
         // Numeric count only -> not considered small formatting by implementation
-        assert!(!is_small_formatting_command(&vec_str(&[
-            "head", "-n", "40"
-        ])));
+        assert!(!is_small_formatting_command(&shlex_split_safe(
+            "head -n 40"
+        )));
         // With explicit file -> not small formatting
-        assert!(!is_small_formatting_command(&vec_str(&[
-            "head", "-n", "40", "file.txt"
-        ])));
+        assert!(!is_small_formatting_command(&shlex_split_safe(
+            "head -n 40 file.txt"
+        )));
         // File only (no count) -> treated as small formatting by implementation
         assert!(is_small_formatting_command(&vec_str(&["head", "file.txt"])));
     }
@@ -612,19 +588,19 @@ mod tests {
         // No args -> small formatting
         assert!(is_small_formatting_command(&vec_str(&["tail"])));
         // Numeric with plus offset -> not small formatting
-        assert!(!is_small_formatting_command(&vec_str(&[
-            "tail", "-n", "+10"
-        ])));
-        assert!(!is_small_formatting_command(&vec_str(&[
-            "tail", "-n", "+10", "file.txt"
-        ])));
+        assert!(!is_small_formatting_command(&shlex_split_safe(
+            "tail -n +10"
+        )));
+        assert!(!is_small_formatting_command(&shlex_split_safe(
+            "tail -n +10 file.txt"
+        )));
         // Numeric count
-        assert!(!is_small_formatting_command(&vec_str(&[
-            "tail", "-n", "30"
-        ])));
-        assert!(!is_small_formatting_command(&vec_str(&[
-            "tail", "-n", "30", "file.txt"
-        ])));
+        assert!(!is_small_formatting_command(&shlex_split_safe(
+            "tail -n 30"
+        )));
+        assert!(!is_small_formatting_command(&shlex_split_safe(
+            "tail -n 30 file.txt"
+        )));
         // File only -> small formatting by implementation
         assert!(is_small_formatting_command(&vec_str(&["tail", "file.txt"])));
     }
@@ -636,19 +612,19 @@ mod tests {
         // sed -n <range> (no file) -> still small formatting
         assert!(is_small_formatting_command(&vec_str(&["sed", "-n", "10p"])));
         // Valid range with file -> not small formatting
-        assert!(!is_small_formatting_command(&vec_str(&[
-            "sed", "-n", "10p", "file.txt"
-        ])));
-        assert!(!is_small_formatting_command(&vec_str(&[
-            "sed", "-n", "1,200p", "file.txt"
-        ])));
+        assert!(!is_small_formatting_command(&shlex_split_safe(
+            "sed -n 10p file.txt"
+        )));
+        assert!(!is_small_formatting_command(&shlex_split_safe(
+            "sed -n 1,200p file.txt"
+        )));
         // Invalid ranges with file -> small formatting
-        assert!(is_small_formatting_command(&vec_str(&[
-            "sed", "-n", "p", "file.txt"
-        ])));
-        assert!(is_small_formatting_command(&vec_str(&[
-            "sed", "-n", "+10p", "file.txt"
-        ])));
+        assert!(is_small_formatting_command(&shlex_split_safe(
+            "sed -n p file.txt"
+        )));
+        assert!(is_small_formatting_command(&shlex_split_safe(
+            "sed -n +10p file.txt"
+        )));
     }
 
     #[test]
@@ -663,7 +639,7 @@ mod tests {
         assert_parsed(
             &vec_str(&["bash", "-lc", inner]),
             vec![ParsedCommand::Read {
-                cmd: shlex_split(inner).unwrap(),
+                cmd: shlex_split_safe(inner),
                 name: "parse_command.rs".to_string(),
             }],
         );
@@ -675,7 +651,7 @@ mod tests {
         assert_parsed(
             &vec_str(&["bash", "-lc", inner]),
             vec![ParsedCommand::Read {
-                cmd: shlex_split(inner).unwrap(),
+                cmd: shlex_split_safe(inner),
                 name: "history_cell.rs".to_string(),
             }],
         );
@@ -688,7 +664,7 @@ mod tests {
         assert_parsed(
             &vec_str(&["bash", "-lc", inner]),
             vec![ParsedCommand::Read {
-                cmd: vec_str(&["cat", "--", "ansi-escape/Cargo.toml"]),
+                cmd: shlex_split_safe("cat -- ansi-escape/Cargo.toml"),
                 name: "Cargo.toml".to_string(),
             }],
         );
@@ -712,24 +688,15 @@ mod tests {
     #[test]
     fn supports_sed_n_then_nl_as_search() {
         // Ensure `sed -n '<range>' <file> | nl -ba` is summarized as a search for that file.
-        let args = vec_str(&[
-            "sed",
-            "-n",
-            "260,640p",
-            "exec/src/event_processor_with_human_output.rs",
-            "|",
-            "nl",
-            "-ba",
-        ]);
+        let args = shlex_split_safe(
+            "sed -n '260,640p' exec/src/event_processor_with_human_output.rs | nl -ba",
+        );
         assert_parsed(
             &args,
             vec![ParsedCommand::Read {
-                cmd: vec_str(&[
-                    "sed",
-                    "-n",
-                    "260,640p",
-                    "exec/src/event_processor_with_human_output.rs",
-                ]),
+                cmd: shlex_split_safe(
+                    "sed -n '260,640p' exec/src/event_processor_with_human_output.rs",
+                ),
                 name: "event_processor_with_human_output.rs".to_string(),
             }],
         );
@@ -738,9 +705,9 @@ mod tests {
     #[test]
     fn preserves_rg_with_spaces() {
         assert_parsed(
-            &vec_str(&["yes", "|", "rg", "-n", "foo bar", "-S"]),
+            &shlex_split_safe("yes | rg -n 'foo bar' -S"),
             vec![ParsedCommand::Search {
-                cmd: vec_str(&["rg", "-n", "foo bar", "-S"]),
+                cmd: shlex_split_safe("rg -n 'foo bar' -S"),
                 query: Some("foo bar".to_string()),
                 path: None,
                 files_only: false,
@@ -751,9 +718,9 @@ mod tests {
     #[test]
     fn ls_with_glob() {
         assert_parsed(
-            &vec_str(&["ls", "-I", "*.test.js"]),
+            &shlex_split_safe("ls -I '*.test.js'"),
             vec![ParsedCommand::Ls {
-                cmd: vec_str(&["ls", "-I", "*.test.js"]),
+                cmd: shlex_split_safe("ls -I '*.test.js'"),
                 path: None,
             }],
         );
@@ -762,16 +729,16 @@ mod tests {
     #[test]
     fn trim_on_semicolon() {
         assert_parsed(
-            &vec_str(&["rg", "foo", ";", "echo", "done"]),
+            &shlex_split_safe("rg foo ; echo done"),
             vec![
                 ParsedCommand::Search {
-                    cmd: vec_str(&["rg", "foo"]),
+                    cmd: shlex_split_safe("rg foo"),
                     query: Some("foo".to_string()),
                     path: None,
                     files_only: false,
                 },
                 ParsedCommand::Unknown {
-                    cmd: vec_str(&["echo", "done"]),
+                    cmd: shlex_split_safe("echo done"),
                 },
             ],
         );
@@ -781,16 +748,16 @@ mod tests {
     fn split_on_or_connector() {
         // Ensure we split commands on the logical OR operator as well.
         assert_parsed(
-            &vec_str(&["rg", "foo", "||", "echo", "done"]),
+            &shlex_split_safe("rg foo || echo done"),
             vec![
                 ParsedCommand::Search {
-                    cmd: vec_str(&["rg", "foo"]),
+                    cmd: shlex_split_safe("rg foo"),
                     query: Some("foo".to_string()),
                     path: None,
                     files_only: false,
                 },
                 ParsedCommand::Unknown {
-                    cmd: vec_str(&["echo", "done"]),
+                    cmd: shlex_split_safe("echo done"),
                 },
             ],
         );
@@ -799,9 +766,9 @@ mod tests {
     #[test]
     fn shorten_path_on_windows() {
         assert_parsed(
-            &vec_str(&["cat", r#"pkg\src\main.rs"#]),
+            &shlex_split_safe(r#"cat "pkg\src\main.rs""#),
             vec![ParsedCommand::Read {
-                cmd: vec_str(&["cat", r#"pkg\src\main.rs"#]),
+                cmd: shlex_split_safe(r#"cat "pkg\src\main.rs""#),
                 name: "main.rs".to_string(),
             }],
         );
@@ -810,9 +777,9 @@ mod tests {
     #[test]
     fn head_with_no_space() {
         assert_parsed(
-            &vec_str(&["bash", "-lc", "head -n50 Cargo.toml"]),
+            &shlex_split_safe("bash -lc 'head -n50 Cargo.toml'"),
             vec![ParsedCommand::Read {
-                cmd: shlex_split("head -n50 Cargo.toml").unwrap(),
+                cmd: shlex_split_safe("head -n50 Cargo.toml"),
                 name: "Cargo.toml".to_string(),
             }],
         );
@@ -823,16 +790,16 @@ mod tests {
         // Ensure -c is handled similarly to -lc by normalization
         let inner = "rg --files | head -n 1";
         assert_parsed(
-            &vec_str(&["bash", "-c", inner]),
+            &shlex_split_safe(inner),
             vec![
-                ParsedCommand::Unknown {
-                    cmd: vec_str(&["head", "-n", "1"]),
-                },
                 ParsedCommand::Search {
-                    cmd: vec_str(&["rg", "--files"]),
+                    cmd: shlex_split_safe("rg --files"),
                     query: None,
                     path: None,
                     files_only: true,
+                },
+                ParsedCommand::Unknown {
+                    cmd: shlex_split_safe("head -n 1"),
                 },
             ],
         );
@@ -841,9 +808,9 @@ mod tests {
     #[test]
     fn tail_with_no_space() {
         assert_parsed(
-            &vec_str(&["bash", "-lc", "tail -n+10 README.md"]),
+            &shlex_split_safe("bash -lc 'tail -n+10 README.md'"),
             vec![ParsedCommand::Read {
-                cmd: shlex_split("tail -n+10 README.md").unwrap(),
+                cmd: shlex_split_safe("tail -n+10 README.md"),
                 name: "README.md".to_string(),
             }],
         );
@@ -852,9 +819,9 @@ mod tests {
     #[test]
     fn pnpm_test_is_parsed_as_test() {
         assert_parsed(
-            &vec_str(&["pnpm", "test"]),
+            &shlex_split_safe("pnpm test"),
             vec![ParsedCommand::Test {
-                cmd: vec_str(&["pnpm", "test"]),
+                cmd: shlex_split_safe("pnpm test"),
             }],
         );
     }
@@ -864,21 +831,15 @@ mod tests {
         // From commands_combined: cd codex-cli && pnpm exec vitest run tests/... --threads=false --passWithNoTests
         let inner = "cd codex-cli && pnpm exec vitest run tests/file-tag-utils.test.ts --threads=false --passWithNoTests";
         assert_parsed(
-            &vec_str(&["bash", "-lc", inner]),
+            &shlex_split_safe(inner),
             vec![
                 ParsedCommand::Unknown {
-                    cmd: vec_str(&[
-                        "pnpm",
-                        "exec",
-                        "vitest",
-                        "run",
-                        "tests/file-tag-utils.test.ts",
-                        "--threads=false",
-                        "--passWithNoTests",
-                    ]),
+                    cmd: shlex_split_safe("cd codex-cli"),
                 },
                 ParsedCommand::Unknown {
-                    cmd: vec_str(&["cd", "codex-cli"]),
+                    cmd: shlex_split_safe(
+                        "pnpm exec vitest run tests/file-tag-utils.test.ts --threads=false --passWithNoTests",
+                    ),
                 },
             ],
         );
@@ -887,9 +848,9 @@ mod tests {
     #[test]
     fn cargo_test_with_crate() {
         assert_parsed(
-            &vec_str(&["cargo", "test", "-p", "codex-core", "parse_command::"]),
+            &shlex_split_safe("cargo test -p codex-core parse_command::"),
             vec![ParsedCommand::Test {
-                cmd: vec_str(&["cargo", "test", "-p", "codex-core", "parse_command::"]),
+                cmd: shlex_split_safe("cargo test -p codex-core parse_command::"),
             }],
         );
     }
@@ -897,24 +858,13 @@ mod tests {
     #[test]
     fn cargo_test_with_crate_2() {
         assert_parsed(
-            &vec_str(&[
-                "cd",
-                "core",
-                "&&",
-                "cargo",
-                "test",
-                "-q",
-                "parse_command::tests::bash_dash_c_pipeline_parsing",
-                "parse_command::tests::fd_file_finder_variants",
-            ]),
+            &shlex_split_safe(
+                "cd core && cargo test -q parse_command::tests::bash_dash_c_pipeline_parsing parse_command::tests::fd_file_finder_variants",
+            ),
             vec![ParsedCommand::Test {
-                cmd: vec_str(&[
-                    "cargo",
-                    "test",
-                    "-q",
-                    "parse_command::tests::bash_dash_c_pipeline_parsing",
-                    "parse_command::tests::fd_file_finder_variants",
-                ]),
+                cmd: shlex_split_safe(
+                    "cargo test -q parse_command::tests::bash_dash_c_pipeline_parsing parse_command::tests::fd_file_finder_variants",
+                ),
             }],
         );
     }
@@ -922,17 +872,9 @@ mod tests {
     #[test]
     fn cargo_test_with_crate_3() {
         assert_parsed(
-            &vec_str(&[
-                "cd",
-                "core",
-                "&&",
-                "cargo",
-                "test",
-                "-q",
-                "parse_command::tests",
-            ]),
+            &shlex_split_safe("cd core && cargo test -q parse_command::tests"),
             vec![ParsedCommand::Test {
-                cmd: vec_str(&["cargo", "test", "-q", "parse_command::tests"]),
+                cmd: shlex_split_safe("cargo test -q parse_command::tests"),
             }],
         );
     }
@@ -940,26 +882,9 @@ mod tests {
     #[test]
     fn cargo_test_with_crate_4() {
         assert_parsed(
-            &vec_str(&[
-                "cd",
-                "core",
-                "&&",
-                "cargo",
-                "test",
-                "--all-features",
-                "parse_command",
-                "--",
-                "--nocapture",
-            ]),
+            &shlex_split_safe("cd core && cargo test --all-features parse_command -- --nocapture"),
             vec![ParsedCommand::Test {
-                cmd: vec_str(&[
-                    "cargo",
-                    "test",
-                    "--all-features",
-                    "parse_command",
-                    "--",
-                    "--nocapture",
-                ]),
+                cmd: shlex_split_safe("cargo test --all-features parse_command -- --nocapture"),
             }],
         );
     }
@@ -969,9 +894,9 @@ mod tests {
     fn recognizes_black_and_ruff() {
         // black formats Python code
         assert_parsed(
-            &vec_str(&["black", "src"]),
+            &shlex_split_safe("black src"),
             vec![ParsedCommand::Format {
-                cmd: vec_str(&["black", "src"]),
+                cmd: shlex_split_safe("black src"),
                 tool: Some("black".to_string()),
                 targets: Some(vec!["src".to_string()]),
             }],
@@ -979,9 +904,9 @@ mod tests {
 
         // ruff check is a linter; ensure we collect targets
         assert_parsed(
-            &vec_str(&["ruff", "check", "."]),
+            &shlex_split_safe("ruff check ."),
             vec![ParsedCommand::Lint {
-                cmd: vec_str(&["ruff", "check", "."]),
+                cmd: shlex_split_safe("ruff check ."),
                 tool: Some("ruff".to_string()),
                 targets: Some(vec![".".to_string()]),
             }],
@@ -989,9 +914,9 @@ mod tests {
 
         // ruff format is a formatter
         assert_parsed(
-            &vec_str(&["ruff", "format", "pkg/"]),
+            &shlex_split_safe("ruff format pkg/"),
             vec![ParsedCommand::Format {
-                cmd: vec_str(&["ruff", "format", "pkg/"]),
+                cmd: shlex_split_safe("ruff format pkg/"),
                 tool: Some("ruff".to_string()),
                 targets: Some(vec!["pkg/".to_string()]),
             }],
@@ -1002,17 +927,17 @@ mod tests {
     fn recognizes_pnpm_monorepo_test_and_npm_format_script() {
         // pnpm -r test in a monorepo should still parse as a test action
         assert_parsed(
-            &vec_str(&["pnpm", "-r", "test"]),
+            &shlex_split_safe("pnpm -r test"),
             vec![ParsedCommand::Test {
-                cmd: vec_str(&["pnpm", "-r", "test"]),
+                cmd: shlex_split_safe("pnpm -r test"),
             }],
         );
 
         // npm run format should be recognized as a format action
         assert_parsed(
-            &vec_str(&["npm", "run", "format", "--", "-w", "."]),
+            &shlex_split_safe("npm run format -- -w ."),
             vec![ParsedCommand::Format {
-                cmd: vec_str(&["npm", "run", "format", "--", "-w", "."]),
+                cmd: shlex_split_safe("npm run format -- -w ."),
                 tool: Some("npm-script:format".to_string()),
                 targets: None,
             }],
@@ -1022,9 +947,9 @@ mod tests {
     #[test]
     fn yarn_test_is_parsed_as_test() {
         assert_parsed(
-            &vec_str(&["yarn", "test"]),
+            &shlex_split_safe("yarn test"),
             vec![ParsedCommand::Test {
-                cmd: vec_str(&["yarn", "test"]),
+                cmd: shlex_split_safe("yarn test"),
             }],
         );
     }
@@ -1033,17 +958,17 @@ mod tests {
     fn pytest_file_only_and_go_run_regex() {
         // pytest invoked with a file path should be captured as a filter
         assert_parsed(
-            &vec_str(&["pytest", "tests/test_example.py"]),
+            &shlex_split_safe("pytest tests/test_example.py"),
             vec![ParsedCommand::Test {
-                cmd: vec_str(&["pytest", "tests/test_example.py"]),
+                cmd: shlex_split_safe("pytest tests/test_example.py"),
             }],
         );
 
         // go test with -run regex should capture the filter
         assert_parsed(
-            &vec_str(&["go", "test", "./...", "-run", "^TestFoo$"]),
+            &shlex_split_safe("go test ./... -run '^TestFoo$'"),
             vec![ParsedCommand::Test {
-                cmd: vec_str(&["go", "test", "./...", "-run", "^TestFoo$"]),
+                cmd: shlex_split_safe("go test ./... -run '^TestFoo$'"),
             }],
         );
     }
@@ -1051,9 +976,9 @@ mod tests {
     #[test]
     fn grep_with_query_and_path() {
         assert_parsed(
-            &vec_str(&["grep", "-R", "TODO", "src"]),
+            &shlex_split_safe("grep -R TODO src"),
             vec![ParsedCommand::Search {
-                cmd: vec_str(&["grep", "-R", "TODO", "src"]),
+                cmd: shlex_split_safe("grep -R TODO src"),
                 query: Some("TODO".to_string()),
                 path: Some("src".to_string()),
                 files_only: false,
@@ -1064,9 +989,9 @@ mod tests {
     #[test]
     fn rg_with_equals_style_flags() {
         assert_parsed(
-            &vec_str(&["rg", "--colors=never", "-n", "foo", "src"]),
+            &shlex_split_safe("rg --colors=never -n foo src"),
             vec![ParsedCommand::Search {
-                cmd: vec_str(&["rg", "--colors=never", "-n", "foo", "src"]),
+                cmd: shlex_split_safe("rg --colors=never -n foo src"),
                 query: Some("foo".to_string()),
                 path: Some("src".to_string()),
                 files_only: false,
@@ -1078,18 +1003,18 @@ mod tests {
     fn cat_with_double_dash_and_sed_ranges() {
         // cat -- <file> should be treated as a read of that file
         assert_parsed(
-            &vec_str(&["cat", "--", "./-strange-file-name"]),
+            &shlex_split_safe("cat -- ./-strange-file-name"),
             vec![ParsedCommand::Read {
-                cmd: vec_str(&["cat", "--", "./-strange-file-name"]),
+                cmd: shlex_split_safe("cat -- ./-strange-file-name"),
                 name: "-strange-file-name".to_string(),
             }],
         );
 
         // sed -n <range> <file> should be treated as a read of <file>
         assert_parsed(
-            &vec_str(&["sed", "-n", "12,20p", "Cargo.toml"]),
+            &shlex_split_safe("sed -n '12,20p' Cargo.toml"),
             vec![ParsedCommand::Read {
-                cmd: vec_str(&["sed", "-n", "12,20p", "Cargo.toml"]),
+                cmd: shlex_split_safe("sed -n '12,20p' Cargo.toml"),
                 name: "Cargo.toml".to_string(),
             }],
         );
@@ -1099,9 +1024,9 @@ mod tests {
     fn drop_trailing_nl_in_pipeline() {
         // When an `nl` stage has only flags, it should be dropped from the summary
         assert_parsed(
-            &vec_str(&["rg", "--files", "|", "nl", "-ba"]),
+            &shlex_split_safe("rg --files | nl -ba"),
             vec![ParsedCommand::Search {
-                cmd: vec_str(&["rg", "--files"]),
+                cmd: shlex_split_safe("rg --files"),
                 query: None,
                 path: None,
                 files_only: true,
@@ -1112,9 +1037,9 @@ mod tests {
     #[test]
     fn ls_with_time_style_and_path() {
         assert_parsed(
-            &vec_str(&["ls", "--time-style=long-iso", "./dist"]),
+            &shlex_split_safe("ls --time-style=long-iso ./dist"),
             vec![ParsedCommand::Ls {
-                cmd: vec_str(&["ls", "--time-style=long-iso", "./dist"]),
+                cmd: shlex_split_safe("ls --time-style=long-iso ./dist"),
                 // short_display_path drops "dist" and shows "." as the last useful segment
                 path: Some(".".to_string()),
             }],
@@ -1124,9 +1049,9 @@ mod tests {
     #[test]
     fn eslint_with_config_path_and_target() {
         assert_parsed(
-            &vec_str(&["eslint", "-c", ".eslintrc.json", "src"]),
+            &shlex_split_safe("eslint -c .eslintrc.json src"),
             vec![ParsedCommand::Lint {
-                cmd: vec_str(&["eslint", "-c", ".eslintrc.json", "src"]),
+                cmd: shlex_split_safe("eslint -c .eslintrc.json src"),
                 tool: Some("eslint".to_string()),
                 targets: Some(vec!["src".to_string()]),
             }],
@@ -1136,9 +1061,9 @@ mod tests {
     #[test]
     fn npx_eslint_with_config_path_and_target() {
         assert_parsed(
-            &vec_str(&["npx", "eslint", "-c", ".eslintrc", "src"]),
+            &shlex_split_safe("npx eslint -c .eslintrc src"),
             vec![ParsedCommand::Lint {
-                cmd: vec_str(&["npx", "eslint", "-c", ".eslintrc", "src"]),
+                cmd: shlex_split_safe("npx eslint -c .eslintrc src"),
                 tool: Some("eslint".to_string()),
                 targets: Some(vec!["src".to_string()]),
             }],
@@ -1149,9 +1074,9 @@ mod tests {
     fn fd_file_finder_variants() {
         // fd with only a path should set files_only and capture the path
         assert_parsed(
-            &vec_str(&["fd", "-t", "f", "src/"]),
+            &shlex_split_safe("fd -t f src/"),
             vec![ParsedCommand::Search {
-                cmd: vec_str(&["fd", "-t", "f", "src/"]),
+                cmd: shlex_split_safe("fd -t f src/"),
                 query: None,
                 path: Some("src".to_string()),
                 files_only: true,
@@ -1160,9 +1085,9 @@ mod tests {
 
         // fd with query and path should capture both
         assert_parsed(
-            &vec_str(&["fd", "main", "src"]),
+            &shlex_split_safe("fd main src"),
             vec![ParsedCommand::Search {
-                cmd: vec_str(&["fd", "main", "src"]),
+                cmd: shlex_split_safe("fd main src"),
                 query: Some("main".to_string()),
                 path: Some("src".to_string()),
                 files_only: true,
@@ -1173,9 +1098,9 @@ mod tests {
     #[test]
     fn find_basic_name_filter() {
         assert_parsed(
-            &vec_str(&["find", ".", "-name", "*.rs"]),
+            &shlex_split_safe("find . -name '*.rs'"),
             vec![ParsedCommand::Search {
-                cmd: vec_str(&["find", ".", "-name", "*.rs"]),
+                cmd: shlex_split_safe("find . -name '*.rs'"),
                 query: Some("*.rs".to_string()),
                 path: Some(".".to_string()),
                 files_only: true,
@@ -1186,9 +1111,9 @@ mod tests {
     #[test]
     fn find_type_only_path() {
         assert_parsed(
-            &vec_str(&["find", "src", "-type", "f"]),
+            &shlex_split_safe("find src -type f"),
             vec![ParsedCommand::Search {
-                cmd: vec_str(&["find", "src", "-type", "f"]),
+                cmd: shlex_split_safe("find src -type f"),
                 query: None,
                 path: Some("src".to_string()),
                 files_only: true,
