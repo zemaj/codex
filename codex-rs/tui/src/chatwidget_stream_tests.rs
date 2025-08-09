@@ -21,10 +21,8 @@ fn normalize_text(s: &str) -> String {
     // Remove inline code backticks and normalize curly quotes to straight quotes.
     let no_ticks = s.replace('`', "");
     no_ticks
-        .replace('\u{2019}', "'") // right single quote
-        .replace('\u{2018}', "'") // left single quote
-        .replace('\u{201C}', "\"") // left double quote
-        .replace('\u{201D}', "\"") // right double quote
+        .replace(['\u{2019}', '\u{2018}'], "'") // left single quote
+        .replace(['\u{201C}', '\u{201D}'], "\"") // right double quote
 }
 
 // Common test helpers are provided by `crate::test_utils`.
@@ -271,12 +269,39 @@ async fn vt100_replay_markdown_session_from_log() {
                     widget.handle_codex_event(ev);
                     // Drain and render; count 'codex' header insertions for current turn.
                     while let Ok(app_ev) = rx.try_recv() {
-                        match app_ev {
-                            AppEvent::InsertHistory(lines) => {
+                        if let AppEvent::InsertHistory(lines) = app_ev {
+                            if let Some(idx) = current_turn_index {
+                                let texts = crate::test_utils::lines_to_plain_strings(&lines);
+                                let turn_count =
+                                    texts.iter().filter(|s| s.as_str() == "codex").count();
+                                codex_headers_per_turn[idx] += turn_count;
+                                crate::test_utils::append_lines_to_transcript(
+                                    &lines,
+                                    &mut transcript_per_turn[idx],
+                                );
+                            }
+                            crate::insert_history::insert_history_lines_to_writer(
+                                &mut terminal,
+                                &mut ansi,
+                                lines,
+                            );
+                        }
+                    }
+                }
+            }
+            "app_event" => {
+                if let Some(variant) = v.get("variant").and_then(|s| s.as_str()) {
+                    if variant == "CommitTick" {
+                        widget.on_commit_tick();
+                        while let Ok(app_ev) = rx.try_recv() {
+                            if let AppEvent::InsertHistory(lines) = app_ev {
                                 if let Some(idx) = current_turn_index {
-                                    let texts = crate::test_utils::lines_to_plain_strings(&lines);
-                                    let turn_count =
-                                        texts.iter().filter(|s| s.as_str() == "codex").count();
+                                    let texts =
+                                        crate::test_utils::lines_to_plain_strings(&lines);
+                                    let turn_count = texts
+                                        .iter()
+                                        .filter(|s| s.as_str() == "codex")
+                                        .count();
                                     codex_headers_per_turn[idx] += turn_count;
                                     crate::test_utils::append_lines_to_transcript(
                                         &lines,
@@ -289,43 +314,7 @@ async fn vt100_replay_markdown_session_from_log() {
                                     lines,
                                 );
                             }
-                            _ => {}
                         }
-                    }
-                }
-            }
-            "app_event" => {
-                if let Some(variant) = v.get("variant").and_then(|s| s.as_str()) {
-                    match variant {
-                        "CommitTick" => {
-                            widget.on_commit_tick();
-                            while let Ok(app_ev) = rx.try_recv() {
-                                match app_ev {
-                                    AppEvent::InsertHistory(lines) => {
-                                        if let Some(idx) = current_turn_index {
-                                            let texts =
-                                                crate::test_utils::lines_to_plain_strings(&lines);
-                                            let turn_count = texts
-                                                .iter()
-                                                .filter(|s| s.as_str() == "codex")
-                                                .count();
-                                            codex_headers_per_turn[idx] += turn_count;
-                                            crate::test_utils::append_lines_to_transcript(
-                                                &lines,
-                                                &mut transcript_per_turn[idx],
-                                            );
-                                        }
-                                        crate::insert_history::insert_history_lines_to_writer(
-                                            &mut terminal,
-                                            &mut ansi,
-                                            lines,
-                                        );
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        _ => {}
                     }
                 }
             }
@@ -355,18 +344,15 @@ async fn vt100_replay_markdown_session_from_log() {
     // Assert exactly one 'codex' header per turn for the first two turns.
     assert!(
         codex_headers_per_turn.len() >= 2,
-        "expected at least two turns; counts = {:?}",
-        codex_headers_per_turn
+        "expected at least two turns; counts = {codex_headers_per_turn:?}"
     );
     assert_eq!(
         codex_headers_per_turn[0], 1,
-        "first turn should have exactly one 'codex' header; counts = {:?}",
-        codex_headers_per_turn
+        "first turn should have exactly one 'codex' header; counts = {codex_headers_per_turn:?}"
     );
     assert_eq!(
         codex_headers_per_turn[1], 1,
-        "second turn should have exactly one 'codex' header; counts = {:?}",
-        codex_headers_per_turn
+        "second turn should have exactly one 'codex' header; counts = {codex_headers_per_turn:?}"
     );
 
     // Verify every turn's transcript contains the expected full answer.
@@ -455,10 +441,48 @@ async fn vt100_replay_longer_markdown_session_from_log() {
                     }
                     widget.handle_codex_event(ev);
                     while let Ok(app_ev) = rx.try_recv() {
-                        match app_ev {
-                            AppEvent::InsertHistory(lines) => {
+                        if let AppEvent::InsertHistory(lines) = app_ev {
+                            if let Some(idx) = current_turn_index {
+                                let texts = crate::test_utils::lines_to_plain_strings(&lines);
+                                let mut turn_count = 0usize;
+                                for (i, s) in texts.iter().enumerate() {
+                                    if s == "codex" {
+                                        turn_count += 1;
+                                        saw_codex_header_in_turn[idx] = true;
+                                        if texts
+                                            .iter()
+                                            .skip(i + 1)
+                                            .any(|t| !t.trim().is_empty())
+                                        {
+                                            header_batched_with_content[idx] = true;
+                                        }
+                                    } else if saw_codex_header_in_turn[idx]
+                                        && !s.trim().is_empty()
+                                        && first_non_header_line_per_turn[idx].is_none()
+                                    {
+                                        first_non_header_line_per_turn[idx] = Some(s.clone());
+                                    }
+                                }
+                                codex_headers_per_turn[idx] += turn_count;
+                            }
+                            crate::insert_history::insert_history_lines_to_writer(
+                                &mut terminal,
+                                &mut ansi,
+                                lines,
+                            );
+                        }
+                    }
+                }
+            }
+            "app_event" => {
+                if let Some(variant) = v.get("variant").and_then(|s| s.as_str()) {
+                    if variant == "CommitTick" {
+                        widget.on_commit_tick();
+                        while let Ok(app_ev) = rx.try_recv() {
+                            if let AppEvent::InsertHistory(lines) = app_ev {
                                 if let Some(idx) = current_turn_index {
-                                    let texts = crate::test_utils::lines_to_plain_strings(&lines);
+                                    let texts =
+                                        crate::test_utils::lines_to_plain_strings(&lines);
                                     let mut turn_count = 0usize;
                                     for (i, s) in texts.iter().enumerate() {
                                         if s == "codex" {
@@ -475,7 +499,8 @@ async fn vt100_replay_longer_markdown_session_from_log() {
                                             && !s.trim().is_empty()
                                             && first_non_header_line_per_turn[idx].is_none()
                                         {
-                                            first_non_header_line_per_turn[idx] = Some(s.clone());
+                                            first_non_header_line_per_turn[idx] =
+                                                Some(s.clone());
                                         }
                                     }
                                     codex_headers_per_turn[idx] += turn_count;
@@ -486,55 +511,7 @@ async fn vt100_replay_longer_markdown_session_from_log() {
                                     lines,
                                 );
                             }
-                            _ => {}
                         }
-                    }
-                }
-            }
-            "app_event" => {
-                if let Some(variant) = v.get("variant").and_then(|s| s.as_str()) {
-                    match variant {
-                        "CommitTick" => {
-                            widget.on_commit_tick();
-                            while let Ok(app_ev) = rx.try_recv() {
-                                match app_ev {
-                                    AppEvent::InsertHistory(lines) => {
-                                        if let Some(idx) = current_turn_index {
-                                            let texts =
-                                                crate::test_utils::lines_to_plain_strings(&lines);
-                                            let mut turn_count = 0usize;
-                                            for (i, s) in texts.iter().enumerate() {
-                                                if s == "codex" {
-                                                    turn_count += 1;
-                                                    saw_codex_header_in_turn[idx] = true;
-                                                    if texts
-                                                        .iter()
-                                                        .skip(i + 1)
-                                                        .any(|t| !t.trim().is_empty())
-                                                    {
-                                                        header_batched_with_content[idx] = true;
-                                                    }
-                                                } else if saw_codex_header_in_turn[idx]
-                                                    && !s.trim().is_empty()
-                                                    && first_non_header_line_per_turn[idx].is_none()
-                                                {
-                                                    first_non_header_line_per_turn[idx] =
-                                                        Some(s.clone());
-                                                }
-                                            }
-                                            codex_headers_per_turn[idx] += turn_count;
-                                        }
-                                        crate::insert_history::insert_history_lines_to_writer(
-                                            &mut terminal,
-                                            &mut ansi,
-                                            lines,
-                                        );
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        _ => {}
                     }
                 }
             }
@@ -546,18 +523,15 @@ async fn vt100_replay_longer_markdown_session_from_log() {
     // turn previously missed the header.
     assert!(
         codex_headers_per_turn.len() >= 2,
-        "expected at least two turns; counts = {:?}",
-        codex_headers_per_turn
+        "expected at least two turns; counts = {codex_headers_per_turn:?}"
     );
     assert_eq!(
         codex_headers_per_turn[0], 1,
-        "first turn should have exactly one 'codex' header; counts = {:?}",
-        codex_headers_per_turn
+        "first turn should have exactly one 'codex' header; counts = {codex_headers_per_turn:?}"
     );
     assert_eq!(
         codex_headers_per_turn[1], 1,
-        "second turn should have exactly one 'codex' header; counts = {:?}",
-        codex_headers_per_turn
+        "second turn should have exactly one 'codex' header; counts = {codex_headers_per_turn:?}"
     );
 
     // Additionally, ensure the header and the first content are batched together in the same
@@ -655,8 +629,28 @@ async fn vt100_replay_longer_hello_session_from_log() {
                     }
                     widget.handle_codex_event(ev);
                     while let Ok(app_ev) = rx.try_recv() {
-                        match app_ev {
-                            AppEvent::InsertHistory(lines) => {
+                        if let AppEvent::InsertHistory(lines) = app_ev {
+                            if let Some(idx) = current_turn_index {
+                                crate::test_utils::append_lines_to_transcript(
+                                    &lines,
+                                    &mut transcript_per_turn[idx],
+                                );
+                            }
+                            crate::insert_history::insert_history_lines_to_writer(
+                                &mut terminal,
+                                &mut ansi,
+                                lines,
+                            );
+                        }
+                    }
+                }
+            }
+            "app_event" => {
+                if let Some(variant) = v.get("variant").and_then(|s| s.as_str()) {
+                    if variant == "CommitTick" {
+                        widget.on_commit_tick();
+                        while let Ok(app_ev) = rx.try_recv() {
+                            if let AppEvent::InsertHistory(lines) = app_ev {
                                 if let Some(idx) = current_turn_index {
                                     crate::test_utils::append_lines_to_transcript(
                                         &lines,
@@ -668,32 +662,6 @@ async fn vt100_replay_longer_hello_session_from_log() {
                                     &mut ansi,
                                     lines,
                                 );
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            "app_event" => {
-                if let Some(variant) = v.get("variant").and_then(|s| s.as_str()) {
-                    if variant == "CommitTick" {
-                        widget.on_commit_tick();
-                        while let Ok(app_ev) = rx.try_recv() {
-                            match app_ev {
-                                AppEvent::InsertHistory(lines) => {
-                                    if let Some(idx) = current_turn_index {
-                                        crate::test_utils::append_lines_to_transcript(
-                                            &lines,
-                                            &mut transcript_per_turn[idx],
-                                        );
-                                    }
-                                    crate::insert_history::insert_history_lines_to_writer(
-                                        &mut terminal,
-                                        &mut ansi,
-                                        lines,
-                                    );
-                                }
-                                _ => {}
                             }
                         }
                     }
