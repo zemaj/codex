@@ -34,7 +34,7 @@ fn append_markdown_with_opener_and_cwd(
             Segment::Text(s) => {
                 let processed = rewrite_file_citations(&s, file_opener, cwd);
                 let rendered = tui_markdown::from_str(&processed);
-                push_owned_lines(rendered.lines, lines);
+                crate::line_utils::push_owned_lines(&rendered.lines, lines);
             }
             Segment::Code { content, .. } => {
                 // Emit the code content exactly as-is, line by line.
@@ -101,22 +101,7 @@ fn rewrite_file_citations<'a>(
     })
 }
 
-// Helper to clone borrowed ratatui lines into owned lines with 'static lifetime.
-fn push_owned_lines<'a>(borrowed: Vec<ratatui::text::Line<'a>>, out: &mut Vec<Line<'static>>) {
-    for borrowed_line in borrowed {
-        let mut owned_spans = Vec::with_capacity(borrowed_line.spans.len());
-        for span in &borrowed_line.spans {
-            let owned_span = Span::styled(span.content.to_string(), span.style);
-            owned_spans.push(owned_span);
-        }
-        let owned_line: Line<'static> = Line::from(owned_spans).style(borrowed_line.style);
-        let owned_line = match borrowed_line.alignment {
-            Some(alignment) => owned_line.alignment(alignment),
-            None => owned_line,
-        };
-        out.push(owned_line);
-    }
-}
+// use shared helper from `line_utils`
 
 // Minimal code block splitting.
 // - Recognizes fenced blocks opened by ``` or ~~~ (allowing leading whitespace).

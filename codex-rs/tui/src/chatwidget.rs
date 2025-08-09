@@ -50,8 +50,8 @@ use crate::exec_command::strip_bash_lc_and_escape;
 use crate::history_cell::CommandOutput;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PatchEventType;
-use crate::markdown_stream::MarkdownNewlineCollector;
-use crate::markdown_stream::RenderedLineStreamer;
+use crate::markdown_stream::AnimatedLineStreamer;
+use crate::markdown_stream::MarkdownStreamCollector;
 use crate::user_approval_widget::ApprovalRequest;
 use codex_file_search::FileMatch;
 
@@ -97,16 +97,16 @@ enum StreamKind {
 }
 
 struct StreamState {
-    collector: MarkdownNewlineCollector,
-    streamer: RenderedLineStreamer,
+    collector: MarkdownStreamCollector,
+    streamer: AnimatedLineStreamer,
     header_emitted: bool,
 }
 
 impl StreamState {
     fn new() -> Self {
         Self {
-            collector: MarkdownNewlineCollector::new(),
-            streamer: RenderedLineStreamer::new(),
+            collector: MarkdownStreamCollector::new(),
+            streamer: AnimatedLineStreamer::new(),
             header_emitted: false,
         }
     }
@@ -185,12 +185,6 @@ impl ChatWidget<'_> {
             StreamKind::Reasoning => ratatui::text::Line::from("thinking".magenta().italic()),
             StreamKind::Answer => ratatui::text::Line::from("codex".magenta().bold()),
         }
-    }
-    fn line_is_blank(line: &ratatui::text::Line<'_>) -> bool {
-        if line.spans.is_empty() {
-            return true;
-        }
-        line.spans.iter().all(|s| s.content.trim().is_empty())
     }
     /// Periodic tick to commit at most one queued line to history with a small delay,
     /// animating the output.
@@ -877,7 +871,7 @@ impl ChatWidget<'_> {
                     lines.extend(step.history);
                     // Ensure at most one blank separator after the flushed block.
                     if let Some(last) = lines.last() {
-                        if !Self::line_is_blank(last) {
+                        if !crate::line_utils::is_blank_line_trim(last) {
                             lines.push(ratatui::text::Line::from(""));
                         }
                     } else {
@@ -963,7 +957,7 @@ impl ChatWidget<'_> {
             }
             if lines
                 .last()
-                .map(|l| !Self::line_is_blank(l))
+                .map(|l| !crate::line_utils::is_blank_line_trim(l))
                 .unwrap_or(true)
             {
                 lines.push(ratatui::text::Line::from(""));

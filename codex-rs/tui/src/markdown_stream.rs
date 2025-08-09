@@ -4,15 +4,16 @@ use codex_core::config::Config;
 use ratatui::text::Line;
 
 use crate::markdown;
+use crate::markdown_utils::{is_inside_unclosed_fence, strip_empty_fenced_code_blocks};
 
 /// Newline-gated accumulator that renders markdown and commits only fully
 /// completed logical lines.
-pub(crate) struct MarkdownNewlineCollector {
+pub(crate) struct MarkdownStreamCollector {
     buffer: String,
     committed_line_count: usize,
 }
 
-impl MarkdownNewlineCollector {
+impl MarkdownStreamCollector {
     pub fn new() -> Self {
         Self {
             buffer: String::new(),
@@ -71,7 +72,9 @@ impl MarkdownNewlineCollector {
         markdown::append_markdown(&source, &mut rendered, config);
 
         let mut complete_line_count = rendered.len();
-        if complete_line_count > 0 && is_effectively_empty(&rendered[complete_line_count - 1]) {
+        if complete_line_count > 0
+            && crate::line_utils::is_blank_line_spaces_only(&rendered[complete_line_count - 1])
+        {
             complete_line_count -= 1;
         }
         if !self.buffer.ends_with('\n') {
@@ -127,85 +130,7 @@ impl MarkdownNewlineCollector {
     }
 }
 
-fn is_effectively_empty(line: &Line<'_>) -> bool {
-    if line.spans.is_empty() {
-        return true;
-    }
-    line.spans
-        .iter()
-        .all(|s| s.content.is_empty() || s.content.chars().all(|c| c == ' '))
-}
-
-/// Remove fenced code blocks that contain no content (whitespace-only) to avoid
-/// streaming empty code blocks like ```lang\n``` or ```\n```.
-fn strip_empty_fenced_code_blocks(s: &str) -> String {
-    // Only remove complete fenced blocks that contain no non-whitespace content.
-    // Leave all other content unchanged to avoid affecting partial streams.
-    let lines: Vec<&str> = s.lines().collect();
-    let mut out = String::with_capacity(s.len());
-    let mut i = 0usize;
-    while i < lines.len() {
-        let line = lines[i];
-        let trimmed_start = line.trim_start();
-        let fence_token = if trimmed_start.starts_with("```") {
-            "```"
-        } else if trimmed_start.starts_with("~~~") {
-            "~~~"
-        } else {
-            ""
-        };
-        if !fence_token.is_empty() {
-            // Find a matching closing fence on its own line.
-            let mut j = i + 1;
-            let mut has_content = false;
-            let mut found_close = false;
-            while j < lines.len() {
-                let l = lines[j];
-                if l.trim() == fence_token {
-                    found_close = true;
-                    break;
-                }
-                if !l.trim().is_empty() {
-                    has_content = true;
-                }
-                j += 1;
-            }
-            if found_close && !has_content {
-                // Drop i..=j and insert at most a single blank separator line.
-                if !out.ends_with('\n') {
-                    out.push('\n');
-                }
-                i = j + 1;
-                continue;
-            }
-            // Not an empty fenced block; emit as-is.
-            out.push_str(line);
-            out.push('\n');
-            i += 1;
-        } else {
-            out.push_str(line);
-            out.push('\n');
-            i += 1;
-        }
-    }
-    out
-}
-
-fn is_inside_unclosed_fence(s: &str) -> bool {
-    let mut open = false;
-    for line in s.lines() {
-        let t = line.trim_start();
-        if t.starts_with("```") || t.starts_with("~~~") {
-            if !open {
-                open = true;
-            } else {
-                // closing fence on same pattern toggles off
-                open = false;
-            }
-        }
-    }
-    open
-}
+/// fence helpers are provided by `crate::markdown_utils`
 
 #[cfg(test)]
 fn unwrap_markdown_language_fence_if_enabled(s: String) -> String {
@@ -259,11 +184,11 @@ pub(crate) struct StepResult {
 
 /// Streams already-rendered rows into history while computing the newest K
 /// rows to show in a live overlay.
-pub(crate) struct RenderedLineStreamer {
+pub(crate) struct AnimatedLineStreamer {
     queue: VecDeque<Line<'static>>,
 }
 
-impl RenderedLineStreamer {
+impl AnimatedLineStreamer {
     pub fn new() -> Self {
         Self {
             queue: VecDeque::new(),
@@ -316,7 +241,7 @@ pub(crate) fn simulate_stream_markdown_for_tests(
     finalize: bool,
     config: &Config,
 ) -> Vec<Line<'static>> {
-    let mut collector = MarkdownNewlineCollector::new();
+    let mut collector = MarkdownStreamCollector::new();
     let mut out = Vec::new();
     for d in deltas {
         collector.push_delta(d);
@@ -350,7 +275,7 @@ mod tests {
     #[test]
     fn no_commit_until_newline() {
         let cfg = test_config();
-        let mut c = MarkdownNewlineCollector::new();
+        let mut c = super::MarkdownStreamCollector::new();
         c.push_delta("Hello, world");
         let out = c.commit_complete_lines(&cfg);
         assert!(out.is_empty(), "should not commit without newline");
@@ -362,7 +287,7 @@ mod tests {
     #[test]
     fn finalize_commits_partial_line() {
         let cfg = test_config();
-        let mut c = MarkdownNewlineCollector::new();
+        let mut c = super::MarkdownStreamCollector::new();
         c.push_delta("Line without newline");
         let out = c.finalize_and_drain(&cfg);
         assert_eq!(out.len(), 1);
@@ -374,7 +299,7 @@ mod tests {
 
         // Stream a paragraph line, then a heading on the next line.
         // Expect two distinct rendered lines: "Hello." and "Heading".
-        let mut c = MarkdownNewlineCollector::new();
+        let mut c = super::MarkdownStreamCollector::new();
         c.push_delta("Hello.\n");
         let out1 = c.commit_complete_lines(&cfg);
         let s1: Vec<String> = out1
@@ -432,7 +357,7 @@ mod tests {
         // Paragraph without trailing newline, then a chunk that starts with the newline
         // and the heading text, then a final newline. The collector should first commit
         // only the paragraph line, and later commit the heading as its own line.
-        let mut c = MarkdownNewlineCollector::new();
+        let mut c = super::MarkdownStreamCollector::new();
         c.push_delta("Sounds good!");
         // No commit yet
         assert!(c.commit_complete_lines(&cfg).is_empty());
