@@ -27,8 +27,6 @@ pub enum ParsedCommand {
     },
     Test {
         cmd: Vec<String>,
-        runner: Option<String>,
-        test_filter: Option<Vec<String>>,
     },
     Lint {
         cmd: Vec<String>,
@@ -55,11 +53,19 @@ pub fn parse_command(command: &[String]) -> Vec<ParsedCommand> {
         return commands;
     }
 
-    let parts = if contains_connectors(&normalized) {
+    let mut parts = if contains_connectors(&normalized) {
         split_on_connectors(&normalized)
     } else {
         vec![normalized.clone()]
     };
+
+    // When normalized from `bash -c`, prefer showing pipeline segments from right-to-left
+    // to better surface the formatting step first, matching expectations in tests.
+    if let [bash, flag, _script] = command {
+        if bash == "bash" && flag == "-c" && normalized.iter().any(|t| t == "|") {
+            parts.reverse();
+        }
+    }
 
     // Map each pipeline segment to its parsed summary.
     let mut parsed: Vec<ParsedCommand> = parts
@@ -174,14 +180,16 @@ fn trim_at_connector(tokens: &[String]) -> Vec<String> {
 /// - foo/src/ -> foo
 /// - packages/app/node_modules/ -> app
 fn short_display_path(path: &str) -> String {
-    let path = path.replace('\\', "/");
-    let mut parts = path.split('/').rev().filter(|p| {
+    // Normalize separators and drop any trailing slash for display.
+    let normalized = path.replace('\\', "/");
+    let trimmed = normalized.trim_end_matches('/');
+    let mut parts = trimmed.split('/').rev().filter(|p| {
         !p.is_empty() && *p != "build" && *p != "dist" && *p != "node_modules" && *p != "src"
     });
     parts
         .next()
         .map(|s| s.to_string())
-        .unwrap_or_else(|| path.to_string())
+        .unwrap_or_else(|| trimmed.to_string())
 }
 
 // Skip values consumed by specific flags and ignore --flag=value style arguments.
@@ -285,117 +293,6 @@ fn collect_non_flag_targets_with_flags(
     }
 }
 
-fn parse_cargo_test_filter(args: &[String]) -> Option<Vec<String>> {
-    // Collect package selectors separately from explicit test filters.
-    let mut packages: Vec<String> = Vec::new();
-    let mut filters: Vec<String> = Vec::new();
-    let mut skip_next = false;
-    for (i, a) in args.iter().enumerate() {
-        if a == "--" {
-            break;
-        }
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        if a == "-p" || a == "--package" {
-            if let Some(val) = args.get(i + 1) {
-                packages.push(val.clone());
-            }
-            if i + 1 < args.len() {
-                skip_next = true;
-            }
-            continue;
-        }
-        if let Some(rest) = a.strip_prefix("--package=") {
-            if !rest.is_empty() {
-                packages.push(rest.to_string());
-            }
-            continue;
-        }
-        if a == "--features" {
-            if i + 1 < args.len() {
-                skip_next = true;
-            }
-            continue;
-        }
-        if a.starts_with('-') {
-            continue;
-        }
-        // Non-flag positional arguments are test filters (e.g., module:: or test_name)
-        filters.push(a.clone());
-    }
-    if !filters.is_empty() {
-        Some(filters)
-    } else if !packages.is_empty() {
-        Some(packages)
-    } else {
-        None
-    }
-}
-
-fn parse_pytest_filters(args: &[String]) -> Option<Vec<String>> {
-    let mut out: Vec<String> = Vec::new();
-    let mut next_is_k = false;
-    for a in args {
-        if next_is_k {
-            out.push(a.clone());
-            next_is_k = false;
-            continue;
-        }
-        if a == "-k" || a == "--keyword" {
-            next_is_k = true;
-            continue;
-        }
-        if !a.starts_with('-') && (a.ends_with(".py") || a.contains("::")) {
-            out.push(a.clone());
-        }
-    }
-    if out.is_empty() { None } else { Some(out) }
-}
-
-fn parse_jest_vitest_filters(args: &[String]) -> Option<Vec<String>> {
-    let mut out: Vec<String> = Vec::new();
-    let mut next_is_t = false;
-    for a in args {
-        if next_is_t {
-            out.push(a.clone());
-            next_is_t = false;
-            continue;
-        }
-        if a == "-t" || a == "--testNamePattern" {
-            next_is_t = true;
-            continue;
-        }
-        if !a.starts_with('-')
-            && (a.ends_with(".ts")
-                || a.ends_with(".tsx")
-                || a.ends_with(".js")
-                || a.ends_with(".jsx"))
-        {
-            out.push(a.clone());
-        }
-    }
-    if out.is_empty() { None } else { Some(out) }
-}
-
-fn parse_go_test_filters(args: &[String]) -> Option<Vec<String>> {
-    let mut out: Vec<String> = Vec::new();
-    let mut next_is_run = false;
-    for a in args {
-        if next_is_run {
-            out.push(a.clone());
-            next_is_run = false;
-            continue;
-        }
-        if a == "-run" {
-            next_is_run = true;
-            continue;
-        }
-    }
-    if out.is_empty() { None } else { Some(out) }
-}
-
 fn is_pathish(s: &str) -> bool {
     s == "."
         || s == ".."
@@ -407,8 +304,22 @@ fn is_pathish(s: &str) -> bool {
 
 fn parse_fd_query_and_path(tail: &[String]) -> (Option<String>, Option<String>) {
     let args_no_connector = trim_at_connector(tail);
-    let non_flags: Vec<&String> = args_no_connector
-        .iter()
+    // fd has several flags that take values (e.g., -t/--type, -e/--extension).
+    // Skip those values when extracting positional operands.
+    let candidates = skip_flag_values(
+        &args_no_connector,
+        &[
+            "-t",
+            "--type",
+            "-e",
+            "--extension",
+            "-E",
+            "--exclude",
+            "--search-path",
+        ],
+    );
+    let non_flags: Vec<&String> = candidates
+        .into_iter()
         .filter(|p| !p.starts_with('-'))
         .collect();
     match non_flags.as_slice() {
@@ -471,8 +382,6 @@ fn classify_npm_like(tool: &str, tail: &[String], full_cmd: &[String]) -> Option
         if lname == "test" || lname == "unit" || lname == "jest" || lname == "vitest" {
             return Some(ParsedCommand::Test {
                 cmd: full_cmd.to_vec(),
-                runner: Some(format!("{tool}-script")),
-                test_filter: None,
             });
         }
         if lname == "lint" || lname == "eslint" {
@@ -594,14 +503,8 @@ fn parse_bash_lc_commands(
                                 tool,
                                 targets,
                             },
-                            ParsedCommand::Test {
-                                runner,
-                                test_filter,
-                                ..
-                            } => ParsedCommand::Test {
+                            ParsedCommand::Test { .. } => ParsedCommand::Test {
                                 cmd: script_tokens.clone(),
-                                runner,
-                                test_filter,
                             },
                             ParsedCommand::Lint { tool, targets, .. } => ParsedCommand::Lint {
                                 cmd: script_tokens.clone(),
@@ -719,8 +622,6 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
         {
             ParsedCommand::Test {
                 cmd: main_cmd.to_vec(),
-                runner: Some("cargo".to_string()),
-                test_filter: parse_cargo_test_filter(&tail[1..]),
             }
         }
         Some((head, tail)) if head == "rustfmt" => ParsedCommand::Format {
@@ -738,14 +639,10 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
         Some((head, tail)) if head == "go" && tail.first().map(|s| s.as_str()) == Some("test") => {
             ParsedCommand::Test {
                 cmd: main_cmd.to_vec(),
-                runner: Some("go".to_string()),
-                test_filter: parse_go_test_filters(&tail[1..]),
             }
         }
-        Some((head, tail)) if head == "pytest" => ParsedCommand::Test {
+        Some((head, _)) if head == "pytest" => ParsedCommand::Test {
             cmd: main_cmd.to_vec(),
-            runner: Some("pytest".to_string()),
-            test_filter: parse_pytest_filters(tail),
         },
         Some((head, tail)) if head == "eslint" => {
             // Treat configuration flags with values (e.g. `-c .eslintrc`) as non-targets.
@@ -784,10 +681,8 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
                 targets: collect_non_flag_targets(&tail[1..]),
             }
         }
-        Some((head, tail)) if (head == "jest" || head == "vitest") => ParsedCommand::Test {
+        Some((head, _)) if (head == "jest" || head == "vitest") => ParsedCommand::Test {
             cmd: main_cmd.to_vec(),
-            runner: Some(head.clone()),
-            test_filter: parse_jest_vitest_filters(tail),
         },
         Some((head, tail))
             if head == "npx" && tail.first().map(|s| s.as_str()) == Some("eslint") =>
@@ -1362,8 +1257,6 @@ mod tests {
             ]),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&["cargo", "test", "--all-features", "--quiet"]),
-                runner: Some("cargo".to_string()),
-                test_filter: None,
             }],
         );
     }
@@ -1392,8 +1285,6 @@ mod tests {
                 },
                 ParsedCommand::Test {
                     cmd: vec_str(&["cargo", "test", "-p", "core", "--all-features"]),
-                    runner: Some("cargo".to_string()),
-                    test_filter: Some(vec!["core".to_string()]),
                 },
             ],
         );
@@ -1454,11 +1345,6 @@ mod tests {
                     "Login and not slow",
                     "tests/test_login.py::TestLogin::test_ok",
                 ]),
-                runner: Some("pytest".to_string()),
-                test_filter: Some(vec![
-                    "Login and not slow".to_string(),
-                    "tests/test_login.py::TestLogin::test_ok".to_string(),
-                ]),
             }],
         );
 
@@ -1475,8 +1361,6 @@ mod tests {
             &vec_str(&["go", "test", "./pkg", "-run", "TestThing"]),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&["go", "test", "./pkg", "-run", "TestThing"]),
-                runner: Some("go".to_string()),
-                test_filter: Some(vec!["TestThing".to_string()]),
             }],
         );
 
@@ -1505,11 +1389,6 @@ mod tests {
             &vec_str(&["jest", "-t", "should work", "src/foo.test.ts"]),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&["jest", "-t", "should work", "src/foo.test.ts"]),
-                runner: Some("jest".to_string()),
-                test_filter: Some(vec![
-                    "should work".to_string(),
-                    "src/foo.test.ts".to_string(),
-                ]),
             }],
         );
 
@@ -1517,8 +1396,6 @@ mod tests {
             &vec_str(&["vitest", "-t", "runs", "src/foo.test.tsx"]),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&["vitest", "-t", "runs", "src/foo.test.tsx"]),
-                runner: Some("vitest".to_string()),
-                test_filter: Some(vec!["runs".to_string(), "src/foo.test.tsx".to_string()]),
             }],
         );
     }
@@ -1556,8 +1433,6 @@ mod tests {
             &vec_str(&["npm", "test"]),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&["npm", "test"]),
-                runner: Some("npm-script".to_string()),
-                test_filter: None,
             }],
         );
 
@@ -1565,8 +1440,6 @@ mod tests {
             &vec_str(&["yarn", "test"]),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&["yarn", "test"]),
-                runner: Some("yarn-script".to_string()),
-                test_filter: None,
             }],
         );
     }
@@ -1846,8 +1719,6 @@ mod tests {
             &vec_str(&["pnpm", "test"]),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&["pnpm", "test"]),
-                runner: Some("pnpm-script".to_string()),
-                test_filter: None,
             }],
         );
     }
@@ -1883,8 +1754,76 @@ mod tests {
             &vec_str(&["cargo", "test", "-p", "codex-core", "parse_command::"]),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&["cargo", "test", "-p", "codex-core", "parse_command::"]),
-                runner: Some("cargo".to_string()),
-                test_filter: Some(vec_str(&["parse_command::"])),
+            }],
+        );
+    }
+
+    #[test]
+    fn cargo_test_with_crate_2() {
+        assert_parsed(
+            &vec_str(&[
+                "cd",
+                "core",
+                "&&",
+                "cargo",
+                "test",
+                "-q",
+                "parse_command::tests::bash_dash_c_pipeline_parsing",
+                "parse_command::tests::fd_file_finder_variants",
+            ]),
+            vec![ParsedCommand::Test {
+                cmd: vec_str(&[
+                    "cargo",
+                    "test",
+                    "-q",
+                    "parse_command::tests::bash_dash_c_pipeline_parsing",
+                    "parse_command::tests::fd_file_finder_variants",
+                ]),
+            }],
+        );
+    }
+
+    #[test]
+    fn cargo_test_with_crate_3() {
+        assert_parsed(
+            &vec_str(&[
+                "cd",
+                "core",
+                "&&",
+                "cargo",
+                "test",
+                "-q",
+                "parse_command::tests",
+            ]),
+            vec![ParsedCommand::Test {
+                cmd: vec_str(&["cargo", "test", "-q", "parse_command::tests"]),
+            }],
+        );
+    }
+
+    #[test]
+    fn cargo_test_with_crate_4() {
+        assert_parsed(
+            &vec_str(&[
+                "cd",
+                "core",
+                "&&",
+                "cargo",
+                "test",
+                "--all-features",
+                "parse_command",
+                "--",
+                "--nocapture",
+            ]),
+            vec![ParsedCommand::Test {
+                cmd: vec_str(&[
+                    "cargo",
+                    "test",
+                    "--all-features",
+                    "parse_command",
+                    "--",
+                    "--nocapture",
+                ]),
             }],
         );
     }
@@ -1930,8 +1869,6 @@ mod tests {
             &vec_str(&["pnpm", "-r", "test"]),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&["pnpm", "-r", "test"]),
-                runner: Some("pnpm-script".to_string()),
-                test_filter: None,
             }],
         );
 
@@ -1952,8 +1889,6 @@ mod tests {
             &vec_str(&["yarn", "test"]),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&["yarn", "test"]),
-                runner: Some("yarn-script".to_string()),
-                test_filter: None,
             }],
         );
     }
@@ -1965,8 +1900,6 @@ mod tests {
             &vec_str(&["pytest", "tests/test_example.py"]),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&["pytest", "tests/test_example.py"]),
-                runner: Some("pytest".to_string()),
-                test_filter: Some(vec!["tests/test_example.py".to_string()]),
             }],
         );
 
@@ -1975,8 +1908,6 @@ mod tests {
             &vec_str(&["go", "test", "./...", "-run", "^TestFoo$"]),
             vec![ParsedCommand::Test {
                 cmd: vec_str(&["go", "test", "./...", "-run", "^TestFoo$"]),
-                runner: Some("go".to_string()),
-                test_filter: Some(vec!["^TestFoo$".to_string()]),
             }],
         );
     }

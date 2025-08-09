@@ -513,46 +513,24 @@ impl HistoryCell {
         output: Option<&CommandOutput>,
     ) -> Vec<Line<'static>> {
         use std::collections::BTreeSet;
-        let mut runners: BTreeSet<String> = BTreeSet::new();
-        let mut filters: BTreeSet<String> = BTreeSet::new();
+        let mut cmds: BTreeSet<String> = BTreeSet::new();
         for c in test_commands {
-            if let ParsedCommand::Test {
-                runner,
-                test_filter,
-                ..
-            } = c
-            {
-                if let Some(runner) = runner {
-                    runners.insert(runner.clone());
-                }
-                if let Some(f) = test_filter {
-                    for it in f {
-                        filters.insert(it.clone());
-                    }
-                }
+            if let ParsedCommand::Test { cmd, .. } = c {
+                cmds.insert(cmd.join(" "));
             }
         }
 
-        if filters.is_empty() {
+        if cmds.is_empty() {
             for c in test_commands {
                 if let ParsedCommand::Test { cmd, .. } = c {
-                    filters.insert(cmd.join(" "));
+                    cmds.insert(cmd.join(" "));
                 }
             }
         }
-
-        let mut runners_vec: Vec<String> = runners.into_iter().collect();
-        runners_vec.sort();
-        let mut lines: Vec<Line> = vec![match runners_vec.len() {
-            0 => Line::from("🧪 Testing"),
-            _ => Line::from(format!(
-                "🧪 Testing with {}",
-                formatted_list_str(runners_vec)
-            )),
-        }];
+        let mut lines: Vec<Line> = vec![Line::from("🧪 Testing")];
 
         let mut first = true;
-        for f in filters.into_iter().take(10) {
+        for f in cmds.into_iter().take(10) {
             if first {
                 lines.push(Line::from(vec![
                     "  ⎿ ".into(),
