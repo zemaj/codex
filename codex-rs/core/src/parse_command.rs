@@ -256,6 +256,21 @@ fn collect_non_flag_targets(args: &[String]) -> Option<Vec<String>> {
     }
 }
 
+fn collect_non_flag_targets_with_flags(
+    args: &[String],
+    flags_with_vals: &[&str],
+) -> Option<Vec<String>> {
+    let candidates = skip_flag_values(args, flags_with_vals);
+    let mut targets: Vec<String> = Vec::new();
+    for a in candidates {
+        if a.starts_with('-') {
+            continue;
+        }
+        targets.push(a.clone());
+    }
+    if targets.is_empty() { None } else { Some(targets) }
+}
+
 fn parse_cargo_test_filter(args: &[String]) -> Option<Vec<String>> {
     // Collect package selectors separately from explicit test filters.
     let mut packages: Vec<String> = Vec::new();
@@ -365,6 +380,15 @@ fn parse_go_test_filters(args: &[String]) -> Option<Vec<String>> {
         }
     }
     if out.is_empty() { None } else { Some(out) }
+}
+
+fn is_pathish(s: &str) -> bool {
+    s == "."
+        || s == ".."
+        || s.starts_with("./")
+        || s.starts_with("../")
+        || s.contains('/')
+        || s.contains('\\')
 }
 
 fn classify_npm_like(tool: &str, tail: &[String], full_cmd: &[String]) -> Option<ParsedCommand> {
@@ -664,11 +688,18 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
             runner: Some("pytest".to_string()),
             test_filter: parse_pytest_filters(tail),
         },
-        Some((head, tail)) if head == "eslint" => ParsedCommand::Lint {
-            cmd: main_cmd.to_vec(),
-            tool: Some("eslint".to_string()),
-            targets: collect_non_flag_targets(tail),
-        },
+        Some((head, tail)) if head == "eslint" => {
+            // Treat configuration flags with values (e.g. `-c .eslintrc`) as non-targets.
+            let targets = collect_non_flag_targets_with_flags(
+                tail,
+                &["-c", "--config", "--parser", "--parser-options", "--rulesdir", "--plugin"],
+            );
+            ParsedCommand::Lint {
+                cmd: main_cmd.to_vec(),
+                tool: Some("eslint".to_string()),
+                targets,
+            }
+        }
         Some((head, tail)) if head == "prettier" => ParsedCommand::Format {
             cmd: main_cmd.to_vec(),
             tool: Some("prettier".to_string()),
@@ -705,10 +736,14 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
         Some((head, tail))
             if head == "npx" && tail.first().map(|s| s.as_str()) == Some("eslint") =>
         {
+            let targets = collect_non_flag_targets_with_flags(
+                &tail[1..],
+                &["-c", "--config", "--parser", "--parser-options", "--rulesdir", "--plugin"],
+            );
             ParsedCommand::Lint {
                 cmd: main_cmd.to_vec(),
                 tool: Some("eslint".to_string()),
-                targets: collect_non_flag_targets(&tail[1..]),
+                targets,
             }
         }
         Some((head, tail))
@@ -773,6 +808,62 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
                 query,
                 path,
                 files_only,
+            }
+        }
+        Some((head, tail)) if head == "fd" => {
+            // fd is a file finder; treat results as files_only
+            let args_no_connector = trim_at_connector(tail);
+            let non_flags: Vec<&String> = args_no_connector
+                .iter()
+                .filter(|p| !p.starts_with('-'))
+                .collect();
+            let (query, path) = match non_flags.as_slice() {
+                [one] => {
+                    if is_pathish(one) {
+                        (None, Some(short_display_path(one)))
+                    } else {
+                        (Some((*one).clone()), None)
+                    }
+                }
+                [q, p, ..] => (Some((*q).clone()), Some(short_display_path(p))),
+                _ => (None, None),
+            };
+            ParsedCommand::Search {
+                cmd: main_cmd.to_vec(),
+                query,
+                path,
+                files_only: true,
+            }
+        }
+        Some((head, tail)) if head == "find" => {
+            // Basic find support: capture path and common name filter
+            let args_no_connector = trim_at_connector(tail);
+            let mut path: Option<String> = None;
+            // first positional arg is the search root
+            for a in &args_no_connector {
+                if !a.starts_with('-') && *a != "!" && *a != "(" && *a != ")" {
+                    path = Some(short_display_path(a));
+                    break;
+                }
+            }
+            // extract -name/-iname pattern if present
+            let mut query: Option<String> = None;
+            let mut i = 0;
+            while i < args_no_connector.len() {
+                let a = &args_no_connector[i];
+                if a == "-name" || a == "-iname" || a == "-path" || a == "-regex" {
+                    if i + 1 < args_no_connector.len() {
+                        query = Some(args_no_connector[i + 1].clone());
+                        break;
+                    }
+                }
+                i += 1;
+            }
+            ParsedCommand::Search {
+                cmd: main_cmd.to_vec(),
+                query,
+                path,
+                files_only: true,
             }
         }
         Some((head, tail)) if head == "grep" => {
@@ -1702,6 +1793,26 @@ mod tests {
     }
 
     #[test]
+    fn bash_dash_c_pipeline_parsing() {
+        // Ensure -c is handled similarly to -lc by normalization
+        let inner = "rg --files | head -n 1";
+        assert_parsed(
+            &vec_str(&["bash", "-c", inner]),
+            vec![
+                ParsedCommand::Unknown {
+                    cmd: vec_str(&["head", "-n", "1"]),
+                },
+                ParsedCommand::Search {
+                    cmd: vec_str(&["rg", "--files"]),
+                    query: None,
+                    path: None,
+                    files_only: true,
+                },
+            ],
+        );
+    }
+
+    #[test]
     fn tail_with_no_space() {
         assert_parsed(
             &vec_str(&["bash", "-lc", "tail -n+10 README.md"]),
@@ -1819,6 +1930,18 @@ mod tests {
     }
 
     #[test]
+    fn yarn_test_is_parsed_as_test() {
+        assert_parsed(
+            &vec_str(&["yarn", "test"]),
+            vec![ParsedCommand::Test {
+                cmd: vec_str(&["yarn", "test"]),
+                runner: Some("yarn-script".to_string()),
+                test_filter: None,
+            }],
+        );
+    }
+
+    #[test]
     fn pytest_file_only_and_go_run_regex() {
         // pytest invoked with a file path should be captured as a filter
         assert_parsed(
@@ -1848,6 +1971,19 @@ mod tests {
             vec![ParsedCommand::Search {
                 cmd: vec_str(&["grep", "-R", "TODO", "src"]),
                 query: Some("TODO".to_string()),
+                path: Some("src".to_string()),
+                files_only: false,
+            }],
+        );
+    }
+
+    #[test]
+    fn rg_with_equals_style_flags() {
+        assert_parsed(
+            &vec_str(&["rg", "--colors=never", "-n", "foo", "src"]),
+            vec![ParsedCommand::Search {
+                cmd: vec_str(&["rg", "--colors=never", "-n", "foo", "src"]),
+                query: Some("foo".to_string()),
                 path: Some("src".to_string()),
                 files_only: false,
             }],
@@ -1897,6 +2033,81 @@ mod tests {
                 cmd: vec_str(&["ls", "--time-style=long-iso", "./dist"]),
                 // short_display_path drops "dist" and shows "." as the last useful segment
                 path: Some(".".to_string()),
+            }],
+        );
+    }
+
+    #[test]
+    fn eslint_with_config_path_and_target() {
+        assert_parsed(
+            &vec_str(&["eslint", "-c", ".eslintrc.json", "src"]),
+            vec![ParsedCommand::Lint {
+                cmd: vec_str(&["eslint", "-c", ".eslintrc.json", "src"]),
+                tool: Some("eslint".to_string()),
+                targets: Some(vec!["src".to_string()]),
+            }],
+        );
+    }
+
+    #[test]
+    fn npx_eslint_with_config_path_and_target() {
+        assert_parsed(
+            &vec_str(&["npx", "eslint", "-c", ".eslintrc", "src"]),
+            vec![ParsedCommand::Lint {
+                cmd: vec_str(&["npx", "eslint", "-c", ".eslintrc", "src"]),
+                tool: Some("eslint".to_string()),
+                targets: Some(vec!["src".to_string()]),
+            }],
+        );
+    }
+
+    #[test]
+    fn fd_file_finder_variants() {
+        // fd with only a path should set files_only and capture the path
+        assert_parsed(
+            &vec_str(&["fd", "-t", "f", "src/"]),
+            vec![ParsedCommand::Search {
+                cmd: vec_str(&["fd", "-t", "f", "src/"]),
+                query: None,
+                path: Some("src".to_string()),
+                files_only: true,
+            }],
+        );
+
+        // fd with query and path should capture both
+        assert_parsed(
+            &vec_str(&["fd", "main", "src"]),
+            vec![ParsedCommand::Search {
+                cmd: vec_str(&["fd", "main", "src"]),
+                query: Some("main".to_string()),
+                path: Some("src".to_string()),
+                files_only: true,
+            }],
+        );
+    }
+
+    #[test]
+    fn find_basic_name_filter() {
+        assert_parsed(
+            &vec_str(&["find", ".", "-name", "*.rs"]),
+            vec![ParsedCommand::Search {
+                cmd: vec_str(&["find", ".", "-name", "*.rs"]),
+                query: Some("*.rs".to_string()),
+                path: Some(".".to_string()),
+                files_only: true,
+            }],
+        );
+    }
+
+    #[test]
+    fn find_type_only_path() {
+        assert_parsed(
+            &vec_str(&["find", "src", "-type", "f"]),
+            vec![ParsedCommand::Search {
+                cmd: vec_str(&["find", "src", "-type", "f"]),
+                query: None,
+                path: Some("src".to_string()),
+                files_only: true,
             }],
         );
     }
