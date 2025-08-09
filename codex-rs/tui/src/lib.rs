@@ -41,6 +41,7 @@ mod log_layer;
 mod markdown;
 mod markdown_stream;
 pub mod onboarding;
+mod session_log;
 mod shimmer;
 mod slash_command;
 mod status_indicator_widget;
@@ -48,7 +49,6 @@ mod text_block;
 mod text_formatting;
 mod tui;
 mod user_approval_widget;
-mod session_log;
 
 // Internal vt100-based replay tests live as a separate source file to keep them
 // close to the widget code. Include them only when running tests with the

@@ -437,7 +437,11 @@ mod tests {
         let cwd = Path::new("/");
         let mut out = Vec::new();
         append_markdown_with_opener_and_cwd(src, &mut out, UriBasedFileOpener::None, cwd);
-        assert_eq!(out.len(), 1, "expected a single rendered line for plain text");
+        assert_eq!(
+            out.len(),
+            1,
+            "expected a single rendered line for plain text"
+        );
         let rendered: String = out
             .iter()
             .flat_map(|l| l.spans.iter())

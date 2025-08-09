@@ -1,11 +1,15 @@
 #![cfg(feature = "vt100-tests")]
 
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::BufRead;
+use std::io::BufReader;
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::channel;
 
-use codex_core::config::{Config, ConfigOverrides, ConfigToml};
+use codex_core::config::Config;
+use codex_core::config::ConfigOverrides;
+use codex_core::config::ConfigToml;
 use codex_core::protocol::Event as CodexEvent;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
@@ -51,7 +55,7 @@ fn open_fixture(name: &str) -> std::fs::File {
 // production history insertion pipeline into a vt100 parser. This is a
 // faithful replay of a simple conversation, and should currently fail
 // because the final model message is cut off in the UI.
-#[tokio::test(flavor = "current_thread")] 
+#[tokio::test(flavor = "current_thread")]
 async fn vt100_replay_hello_conversation_from_log() {
     // Terminal: make it large enough so the entire short conversation fits on-screen.
     let width: u16 = 100;
@@ -93,21 +97,30 @@ async fn vt100_replay_hello_conversation_from_log() {
     let reader = BufReader::new(file);
     for line in reader.lines() {
         let line = line.expect("read line");
-        if line.trim().is_empty() || line.starts_with('#') { continue; }
-        let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(&line) else { continue };
-        let Some(dir) = v.get("dir").and_then(|d| d.as_str()) else { continue };
-        if dir != "to_tui" { continue; }
-        let Some(kind) = v.get("kind").and_then(|k| k.as_str()) else { continue };
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(&line) else {
+            continue;
+        };
+        let Some(dir) = v.get("dir").and_then(|d| d.as_str()) else {
+            continue;
+        };
+        if dir != "to_tui" {
+            continue;
+        }
+        let Some(kind) = v.get("kind").and_then(|k| k.as_str()) else {
+            continue;
+        };
         match kind {
             "codex_event" => {
                 if let Some(payload) = v.get("payload") {
-                    let ev: CodexEvent = serde_json::from_value(payload.clone())
-                        .expect("parse codex event");
+                    let ev: CodexEvent =
+                        serde_json::from_value(payload.clone()).expect("parse codex event");
                     widget.handle_codex_event(ev);
                     drain_and_render_history(&mut terminal, &rx, &mut ansi);
                 }
             }
-            ,
             "app_event" => {
                 if let Some(variant) = v.get("variant").and_then(|s| s.as_str()) {
                     match variant {
@@ -119,7 +132,6 @@ async fn vt100_replay_hello_conversation_from_log() {
                     }
                 }
             }
-            ,
             _ => { /* ignore other kinds */ }
         }
     }
@@ -131,7 +143,11 @@ async fn vt100_replay_hello_conversation_from_log() {
     for row in 0..height {
         for col in 0..width {
             if let Some(cell) = parser.screen().cell(row, col) {
-                if let Some(ch) = cell.contents().chars().next() { visible.push(ch); } else { visible.push(' '); }
+                if let Some(ch) = cell.contents().chars().next() {
+                    visible.push(ch);
+                } else {
+                    visible.push(' ');
+                }
             } else {
                 visible.push(' ');
             }
@@ -141,9 +157,18 @@ async fn vt100_replay_hello_conversation_from_log() {
 
     // Expect the full conversation segments. This currently fails because the
     // model answer gets cut off and does not render.
-    assert!(visible.contains("user"), "missing user header on screen\n{visible}");
-    assert!(visible.contains("hello"), "missing user text on screen\n{visible}");
-    assert!(visible.contains("thinking"), "missing thinking header on screen\n{visible}");
+    assert!(
+        visible.contains("user"),
+        "missing user header on screen\n{visible}"
+    );
+    assert!(
+        visible.contains("hello"),
+        "missing user text on screen\n{visible}"
+    );
+    assert!(
+        visible.contains("thinking"),
+        "missing thinking header on screen\n{visible}"
+    );
     assert!(
         visible.contains("Responding to user greeting"),
         "missing reasoning summary on screen\n{visible}"
@@ -182,13 +207,8 @@ async fn vt100_replay_markdown_session_from_log() {
     )
     .expect("config");
 
-    let mut widget = crate::chatwidget::ChatWidget::new(
-        cfg,
-        app_sender.clone(),
-        None,
-        Vec::new(),
-        false,
-    );
+    let mut widget =
+        crate::chatwidget::ChatWidget::new(cfg, app_sender.clone(), None, Vec::new(), false);
 
     let mut ansi: Vec<u8> = Vec::new();
 
@@ -207,15 +227,23 @@ async fn vt100_replay_markdown_session_from_log() {
         if line.trim().is_empty() || line.starts_with('#') {
             continue;
         }
-        let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(&line) else { continue };
-        let Some(dir) = v.get("dir").and_then(|d| d.as_str()) else { continue };
-        if dir != "to_tui" { continue; }
-        let Some(kind) = v.get("kind").and_then(|k| k.as_str()) else { continue };
+        let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(&line) else {
+            continue;
+        };
+        let Some(dir) = v.get("dir").and_then(|d| d.as_str()) else {
+            continue;
+        };
+        if dir != "to_tui" {
+            continue;
+        }
+        let Some(kind) = v.get("kind").and_then(|k| k.as_str()) else {
+            continue;
+        };
         match kind {
             "codex_event" => {
                 if let Some(payload) = v.get("payload") {
-                    let ev: CodexEvent = serde_json::from_value(payload.clone())
-                        .expect("parse codex event");
+                    let ev: CodexEvent =
+                        serde_json::from_value(payload.clone()).expect("parse codex event");
                     // Track task boundaries and expected answers.
                     if let CodexEvent { msg, .. } = &ev {
                         if matches!(msg, codex_core::protocol::EventMsg::TaskStarted) {
@@ -232,7 +260,8 @@ async fn vt100_replay_markdown_session_from_log() {
                         if let codex_core::protocol::EventMsg::TaskComplete(tc) = msg {
                             if let Some(idx) = current_turn_index {
                                 if tc.last_agent_message.is_some() {
-                                    expected_full_answer_per_turn[idx] = tc.last_agent_message.clone();
+                                    expected_full_answer_per_turn[idx] =
+                                        tc.last_agent_message.clone();
                                 }
                             }
                         }
@@ -322,7 +351,11 @@ async fn vt100_replay_markdown_session_from_log() {
     for row in 0..height {
         for col in 0..width {
             if let Some(cell) = parser.screen().cell(row, col) {
-                if let Some(ch) = cell.contents().chars().next() { visible.push(ch); } else { visible.push(' '); }
+                if let Some(ch) = cell.contents().chars().next() {
+                    visible.push(ch);
+                } else {
+                    visible.push(' ');
+                }
             } else {
                 visible.push(' ');
             }
@@ -337,14 +370,12 @@ async fn vt100_replay_markdown_session_from_log() {
         codex_headers_per_turn
     );
     assert_eq!(
-        codex_headers_per_turn[0],
-        1,
+        codex_headers_per_turn[0], 1,
         "first turn should have exactly one 'codex' header; counts = {:?}",
         codex_headers_per_turn
     );
     assert_eq!(
-        codex_headers_per_turn[1],
-        1,
+        codex_headers_per_turn[1], 1,
         "second turn should have exactly one 'codex' header; counts = {:?}",
         codex_headers_per_turn
     );
@@ -388,13 +419,8 @@ async fn vt100_replay_longer_markdown_session_from_log() {
     )
     .expect("config");
 
-    let mut widget = crate::chatwidget::ChatWidget::new(
-        cfg,
-        app_sender.clone(),
-        None,
-        Vec::new(),
-        false,
-    );
+    let mut widget =
+        crate::chatwidget::ChatWidget::new(cfg, app_sender.clone(), None, Vec::new(), false);
 
     let mut ansi: Vec<u8> = Vec::new();
 
@@ -412,15 +438,23 @@ async fn vt100_replay_longer_markdown_session_from_log() {
         if line.trim().is_empty() || line.starts_with('#') {
             continue;
         }
-        let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(&line) else { continue };
-        let Some(dir) = v.get("dir").and_then(|d| d.as_str()) else { continue };
-        if dir != "to_tui" { continue; }
-        let Some(kind) = v.get("kind").and_then(|k| k.as_str()) else { continue };
+        let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(&line) else {
+            continue;
+        };
+        let Some(dir) = v.get("dir").and_then(|d| d.as_str()) else {
+            continue;
+        };
+        if dir != "to_tui" {
+            continue;
+        }
+        let Some(kind) = v.get("kind").and_then(|k| k.as_str()) else {
+            continue;
+        };
         match kind {
             "codex_event" => {
                 if let Some(payload) = v.get("payload") {
-                    let ev: CodexEvent = serde_json::from_value(payload.clone())
-                        .expect("parse codex event");
+                    let ev: CodexEvent =
+                        serde_json::from_value(payload.clone()).expect("parse codex event");
                     if let CodexEvent { msg, .. } = &ev {
                         if matches!(msg, codex_core::protocol::EventMsg::TaskStarted) {
                             codex_headers_per_turn.push(0);
@@ -514,7 +548,8 @@ async fn vt100_replay_longer_markdown_session_from_log() {
                                                     && !s.trim().is_empty()
                                                     && first_non_header_line_per_turn[idx].is_none()
                                                 {
-                                                    first_non_header_line_per_turn[idx] = Some(s.clone());
+                                                    first_non_header_line_per_turn[idx] =
+                                                        Some(s.clone());
                                                 }
                                             }
                                             codex_headers_per_turn[idx] += turn_count;
@@ -545,14 +580,12 @@ async fn vt100_replay_longer_markdown_session_from_log() {
         codex_headers_per_turn
     );
     assert_eq!(
-        codex_headers_per_turn[0],
-        1,
+        codex_headers_per_turn[0], 1,
         "first turn should have exactly one 'codex' header; counts = {:?}",
         codex_headers_per_turn
     );
     assert_eq!(
-        codex_headers_per_turn[1],
-        1,
+        codex_headers_per_turn[1], 1,
         "second turn should have exactly one 'codex' header; counts = {:?}",
         codex_headers_per_turn
     );
@@ -612,13 +645,8 @@ async fn vt100_replay_longer_hello_session_from_log() {
     )
     .expect("config");
 
-    let mut widget = crate::chatwidget::ChatWidget::new(
-        cfg,
-        app_sender.clone(),
-        None,
-        Vec::new(),
-        false,
-    );
+    let mut widget =
+        crate::chatwidget::ChatWidget::new(cfg, app_sender.clone(), None, Vec::new(), false);
 
     let mut ansi: Vec<u8> = Vec::new();
 
@@ -631,11 +659,21 @@ async fn vt100_replay_longer_hello_session_from_log() {
 
     for line in reader.lines() {
         let line = line.expect("read line");
-        if line.trim().is_empty() || line.starts_with('#') { continue; }
-        let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(&line) else { continue };
-        let Some(dir) = v.get("dir").and_then(|d| d.as_str()) else { continue };
-        if dir != "to_tui" { continue; }
-        let Some(kind) = v.get("kind").and_then(|k| k.as_str()) else { continue };
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(&line) else {
+            continue;
+        };
+        let Some(dir) = v.get("dir").and_then(|d| d.as_str()) else {
+            continue;
+        };
+        if dir != "to_tui" {
+            continue;
+        }
+        let Some(kind) = v.get("kind").and_then(|k| k.as_str()) else {
+            continue;
+        };
         match kind {
             "codex_event" => {
                 if let Some(payload) = v.get("payload") {
@@ -654,7 +692,8 @@ async fn vt100_replay_longer_hello_session_from_log() {
                         if let codex_core::protocol::EventMsg::TaskComplete(tc) = msg {
                             if let Some(idx) = current_turn_index {
                                 if tc.last_agent_message.is_some() {
-                                    expected_full_answer_per_turn[idx] = tc.last_agent_message.clone();
+                                    expected_full_answer_per_turn[idx] =
+                                        tc.last_agent_message.clone();
                                 }
                             }
                         }
@@ -676,7 +715,10 @@ async fn vt100_replay_longer_hello_session_from_log() {
                                     }
                                 }
                                 crate::insert_history::insert_history_lines_to_writer(
-                                    &mut terminal, &mut ansi, lines);
+                                    &mut terminal,
+                                    &mut ansi,
+                                    lines,
+                                );
                             }
                             _ => {}
                         }
@@ -703,7 +745,10 @@ async fn vt100_replay_longer_hello_session_from_log() {
                                         }
                                     }
                                     crate::insert_history::insert_history_lines_to_writer(
-                                        &mut terminal, &mut ansi, lines);
+                                        &mut terminal,
+                                        &mut ansi,
+                                        lines,
+                                    );
                                 }
                                 _ => {}
                             }
@@ -728,4 +773,3 @@ async fn vt100_replay_longer_hello_session_from_log() {
         }
     }
 }
-

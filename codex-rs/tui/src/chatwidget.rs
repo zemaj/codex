@@ -511,8 +511,8 @@ impl ChatWidget<'_> {
                 // Final assistant answer. Ensure the final text is present in the
                 // collector even if the active stream was torn down (e.g. due to
                 // earlier finalize of another stream) before this event arrived.
-                let answer_started = self.answer.header_emitted
-                    || self.current_stream == Some(StreamKind::Answer);
+                let answer_started =
+                    self.answer.header_emitted || self.current_stream == Some(StreamKind::Answer);
 
                 if !message.is_empty() {
                     // Ensure we're in Answer stream.
@@ -526,7 +526,11 @@ impl ChatWidget<'_> {
                     if !msg_with_nl.ends_with('\n') {
                         msg_with_nl.push('\n');
                     }
-                    crate::markdown::append_markdown(&msg_with_nl, &mut rendered_final, &self.config);
+                    crate::markdown::append_markdown(
+                        &msg_with_nl,
+                        &mut rendered_final,
+                        &self.config,
+                    );
 
                     // Determine how many lines were already inserted into history.
                     let previously_committed = self.answer.collector.committed_count();
@@ -535,11 +539,12 @@ impl ChatWidget<'_> {
 
                     // Replace streamer contents with only the remaining lines beyond what
                     // has already been inserted into history.
-                    let remaining: Vec<ratatui::text::Line<'static>> = if already_inserted >= rendered_final.len() {
-                        Vec::new()
-                    } else {
-                        rendered_final[already_inserted..].to_vec()
-                    };
+                    let remaining: Vec<ratatui::text::Line<'static>> =
+                        if already_inserted >= rendered_final.len() {
+                            Vec::new()
+                        } else {
+                            rendered_final[already_inserted..].to_vec()
+                        };
                     self.answer.streamer.clear();
                     if !remaining.is_empty() {
                         self.answer.streamer.enqueue(remaining);
@@ -690,9 +695,9 @@ impl ChatWidget<'_> {
                 ));
             }
             EventMsg::PatchApplyEnd(event) => {
-                 if event.success {
-                     self.add_to_history(HistoryCell::new_patch_apply_success(event.stdout));
-                 } else {
+                if event.success {
+                    self.add_to_history(HistoryCell::new_patch_apply_success(event.stdout));
+                } else {
                     self.add_to_history(HistoryCell::new_patch_apply_failure(event.stderr));
                 }
             }
@@ -898,23 +903,25 @@ impl ChatWidget<'_> {
             // Ensure the waiting status is visible (composer replaced).
             self.bottom_pane
                 .update_status_text("waiting for model".to_string());
-             // Emit immediately only for reasoning; for answers, defer header
-             // to the first committed line to keep content contiguous.
-             if matches!(kind, StreamKind::Reasoning) {
-                 let mut header_lines = Vec::new();
-                 self.emit_header_if_needed(kind, &mut header_lines);
-                 if !header_lines.is_empty() {
-                     self.app_event_tx
-                         .send(AppEvent::InsertHistory(header_lines));
-                 }
-             }
+            // Emit immediately only for reasoning; for answers, defer header
+            // to the first committed line to keep content contiguous.
+            if matches!(kind, StreamKind::Reasoning) {
+                let mut header_lines = Vec::new();
+                self.emit_header_if_needed(kind, &mut header_lines);
+                if !header_lines.is_empty() {
+                    self.app_event_tx
+                        .send(AppEvent::InsertHistory(header_lines));
+                }
+            }
         }
     }
 
     fn stream_push_and_maybe_commit(&mut self, delta: &str) {
         // Newline-gated: only consider committing when a newline is present.
         let cfg = self.config.clone();
-        let Some((_, state)) = self.active_kind_and_state_mut() else { return };
+        let Some((_, state)) = self.active_kind_and_state_mut() else {
+            return;
+        };
         debug!(target: "chatwidget", "push_delta: len={} contains_nl={}", delta.len(), delta.contains('\n'));
         state.collector.push_delta(delta);
         if delta.contains('\n') {
@@ -954,7 +961,11 @@ impl ChatWidget<'_> {
                 let step = state.streamer.drain_all();
                 lines.extend(step.history);
             }
-            if lines.last().map(|l| !Self::line_is_blank(l)).unwrap_or(true) {
+            if lines
+                .last()
+                .map(|l| !Self::line_is_blank(l))
+                .unwrap_or(true)
+            {
                 lines.push(ratatui::text::Line::from(""));
             }
             // Send directly to history without waiting for commit ticks.
@@ -993,9 +1004,7 @@ impl ChatWidget<'_> {
             // Trailing blank spacer will be animated out via commit ticks.
             {
                 let state = self.state_mut(kind);
-                state
-                    .streamer
-                    .enqueue(vec![ratatui::text::Line::from("")]);
+                state.streamer.enqueue(vec![ratatui::text::Line::from("")]);
             }
             // Mark that we should clear state after draining.
             self.finishing_after_drain = true;
@@ -1044,16 +1053,26 @@ fn add_token_usage(current_usage: &TokenUsage, new_usage: &TokenUsage) -> TokenU
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, unnameable_test_items)]
 mod chatwidget_helper_tests {
     use super::*;
     use crate::app_event::AppEvent;
     use crate::app_event_sender::AppEventSender;
-    use codex_core::config::{ConfigOverrides, ConfigToml};
-    use codex_core::protocol::{ApplyPatchApprovalRequestEvent, FileChange, PatchApplyBeginEvent, PatchApplyEndEvent};
-    use codex_core::plan_tool::{UpdatePlanArgs, PlanItemArg, StepStatus};
-    use codex_core::protocol::{AgentMessageDeltaEvent, AgentReasoningDeltaEvent};
+    use codex_core::config::ConfigOverrides;
+    use codex_core::config::ConfigToml;
+    use codex_core::plan_tool::PlanItemArg;
+    use codex_core::plan_tool::StepStatus;
+    use codex_core::plan_tool::UpdatePlanArgs;
+    use codex_core::protocol::AgentMessageDeltaEvent;
+    use codex_core::protocol::AgentReasoningDeltaEvent;
+    use codex_core::protocol::ApplyPatchApprovalRequestEvent;
+    use codex_core::protocol::FileChange;
+    use codex_core::protocol::PatchApplyBeginEvent;
+    use codex_core::protocol::PatchApplyEndEvent;
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyEvent;
+    use crossterm::event::KeyModifiers;
     use std::sync::mpsc::channel;
-    use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
 
     fn test_config() -> Config {
         // Use base defaults to avoid depending on host state.
@@ -1106,7 +1125,10 @@ mod chatwidget_helper_tests {
                 .collect::<String>();
             s.contains("Hi! How can I help with codex-rs or anything else today?")
         });
-        assert!(found_final, "expected final answer text to be flushed to history");
+        assert!(
+            found_final,
+            "expected final answer text to be flushed to history"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1165,40 +1187,6 @@ mod chatwidget_helper_tests {
                 out.push(lines);
             }
         }
-
-        #[test]
-        fn final_longer_answer_after_single_char_delta_is_complete() {
-            let (mut chat, rx, _op_rx) = make_chatwidget_manual();
-
-            // Simulate a stray delta without newline (e.g., punctuation).
-            chat.handle_codex_event(Event {
-                id: "sub-x".into(),
-                msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta: "?".into() }),
-            });
-
-            // Now send the full final answer with no newline.
-            let full = "Hi! How can I help with codex-rs today? Want me to explore the repo, run tests, or work on a specific change?";
-            chat.handle_codex_event(Event {
-                id: "sub-x".into(),
-                msg: EventMsg::AgentMessage(AgentMessageEvent { message: full.into() }),
-            });
-
-            // Drain and assert the full message appears in history.
-            let cells = drain_insert_history(&rx);
-            let mut found = false;
-            for lines in &cells {
-                let s = lines
-                    .iter()
-                    .flat_map(|l| l.spans.iter())
-                    .map(|sp| sp.content.clone())
-                    .collect::<String>();
-                if s.contains(full) {
-                    found = true;
-                    break;
-                }
-            }
-            assert!(found, "expected full final message to be flushed to history, cells={:?}", cells.len());
-        }
         out
     }
 
@@ -1211,6 +1199,46 @@ mod chatwidget_helper_tests {
             s.push('\n');
         }
         s
+    }
+
+    #[test]
+    fn final_longer_answer_after_single_char_delta_is_complete() {
+        let (mut chat, rx, _op_rx) = make_chatwidget_manual();
+
+        // Simulate a stray delta without newline (e.g., punctuation).
+        chat.handle_codex_event(Event {
+            id: "sub-x".into(),
+            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta: "?".into() }),
+        });
+
+        // Now send the full final answer with no newline.
+        let full = "Hi! How can I help with codex-rs today? Want me to explore the repo, run tests, or work on a specific change?";
+        chat.handle_codex_event(Event {
+            id: "sub-x".into(),
+            msg: EventMsg::AgentMessage(AgentMessageEvent {
+                message: full.into(),
+            }),
+        });
+
+        // Drain and assert the full message appears in history.
+        let cells = drain_insert_history(&rx);
+        let mut found = false;
+        for lines in &cells {
+            let s = lines
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .map(|sp| sp.content.clone())
+                .collect::<String>();
+            if s.contains(full) {
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            found,
+            "expected full final message to be flushed to history, cells={:?}",
+            cells.len()
+        );
     }
 
     #[test]
@@ -1237,7 +1265,7 @@ mod chatwidget_helper_tests {
         });
         let cells = drain_insert_history(&rx);
         assert!(!cells.is_empty(), "expected pending patch cell to be sent");
-        let blob = lines_to_single_string(&cells.last().unwrap());
+        let blob = lines_to_single_string(cells.last().unwrap());
         assert!(
             blob.contains("proposed patch"),
             "missing proposed patch header: {blob:?}"
@@ -1262,7 +1290,7 @@ mod chatwidget_helper_tests {
         });
         let cells = drain_insert_history(&rx);
         assert!(!cells.is_empty(), "expected applying patch cell to be sent");
-        let blob = lines_to_single_string(&cells.last().unwrap());
+        let blob = lines_to_single_string(cells.last().unwrap());
         assert!(
             blob.contains("Applying patch"),
             "missing applying patch header: {blob:?}"
@@ -1281,7 +1309,7 @@ mod chatwidget_helper_tests {
         });
         let cells = drain_insert_history(&rx);
         assert!(!cells.is_empty(), "expected applied patch cell to be sent");
-        let blob = lines_to_single_string(&cells.last().unwrap());
+        let blob = lines_to_single_string(cells.last().unwrap());
         assert!(
             blob.contains("Applied patch"),
             "missing applied patch header: {blob:?}"
@@ -1316,16 +1344,14 @@ mod chatwidget_helper_tests {
         // Expect a CodexOp with PatchApproval carrying the submission id, not call id
         let mut found = false;
         while let Ok(app_ev) = rx.try_recv() {
-            if let AppEvent::CodexOp(op) = app_ev {
-                if let Op::PatchApproval { id, decision } = op {
-                    assert_eq!(id, "sub-123");
-                    assert!(matches!(
-                        decision,
-                        codex_core::protocol::ReviewDecision::Approved
-                    ));
-                    found = true;
-                    break;
-                }
+            if let AppEvent::CodexOp(Op::PatchApproval { id, decision }) = app_ev {
+                assert_eq!(id, "sub-123");
+                assert!(matches!(
+                    decision,
+                    codex_core::protocol::ReviewDecision::Approved
+                ));
+                found = true;
+                break;
             }
         }
         assert!(found, "expected PatchApproval op to be sent");
@@ -1380,7 +1406,10 @@ mod chatwidget_helper_tests {
 
         // 4) Simulate patch begin/end events from backend; ensure history cells are emitted
         let mut changes2 = HashMap::new();
-        changes2.insert(PathBuf::from("pkg.rs"), FileChange::Add { content: "".into() });
+        changes2.insert(
+            PathBuf::from("pkg.rs"),
+            FileChange::Add { content: "".into() },
+        );
         chat.handle_codex_event(Event {
             id: "sub-xyz".into(),
             msg: EventMsg::PatchApplyBegin(PatchApplyBeginEvent {
@@ -1408,7 +1437,10 @@ mod chatwidget_helper_tests {
 
         // Simulate a patch approval request from backend
         let mut changes = HashMap::new();
-        changes.insert(PathBuf::from("a.rs"), FileChange::Add { content: "".into() });
+        changes.insert(
+            PathBuf::from("a.rs"),
+            FileChange::Add { content: "".into() },
+        );
         chat.handle_codex_event(Event {
             id: "sub-1".into(),
             msg: EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
@@ -1494,15 +1526,27 @@ mod chatwidget_helper_tests {
         let update = UpdatePlanArgs {
             explanation: Some("Adapting plan".to_string()),
             plan: vec![
-                PlanItemArg { step: "Explore codebase".into(), status: StepStatus::Completed },
-                PlanItemArg { step: "Implement feature".into(), status: StepStatus::InProgress },
-                PlanItemArg { step: "Write tests".into(), status: StepStatus::Pending },
+                PlanItemArg {
+                    step: "Explore codebase".into(),
+                    status: StepStatus::Completed,
+                },
+                PlanItemArg {
+                    step: "Implement feature".into(),
+                    status: StepStatus::InProgress,
+                },
+                PlanItemArg {
+                    step: "Write tests".into(),
+                    status: StepStatus::Pending,
+                },
             ],
         };
-        chat.handle_codex_event(Event { id: "sub-1".into(), msg: EventMsg::PlanUpdate(update) });
+        chat.handle_codex_event(Event {
+            id: "sub-1".into(),
+            msg: EventMsg::PlanUpdate(update),
+        });
         let cells = drain_insert_history(&rx);
         assert!(!cells.is_empty(), "expected plan update cell to be sent");
-        let blob = lines_to_single_string(&cells.last().unwrap());
+        let blob = lines_to_single_string(cells.last().unwrap());
         assert!(blob.contains("Updated"), "missing plan header: {blob:?}");
         assert!(blob.contains("Explore codebase"));
         assert!(blob.contains("Implement feature"));
@@ -1516,45 +1560,84 @@ mod chatwidget_helper_tests {
         // Answer: no header until a newline commit
         chat.handle_codex_event(Event {
             id: "sub-a".into(),
-            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta: "Hello".into() }),
+            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+                delta: "Hello".into(),
+            }),
         });
         let mut saw_codex_pre = false;
         while let Ok(ev) = rx.try_recv() {
             if let AppEvent::InsertHistory(lines) = ev {
-                let s = lines.iter().flat_map(|l| l.spans.iter()).map(|sp| sp.content.clone()).collect::<Vec<_>>().join("");
-                if s.contains("codex") { saw_codex_pre = true; break; }
+                let s = lines
+                    .iter()
+                    .flat_map(|l| l.spans.iter())
+                    .map(|sp| sp.content.clone())
+                    .collect::<Vec<_>>()
+                    .join("");
+                if s.contains("codex") {
+                    saw_codex_pre = true;
+                    break;
+                }
             }
         }
-        assert!(!saw_codex_pre, "answer header should not be emitted before first newline commit");
+        assert!(
+            !saw_codex_pre,
+            "answer header should not be emitted before first newline commit"
+        );
 
         // Newline arrives, then header is emitted
         chat.handle_codex_event(Event {
             id: "sub-a".into(),
-            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta: "!\n".into() }),
+            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+                delta: "!\n".into(),
+            }),
         });
         chat.on_commit_tick();
         let mut saw_codex_post = false;
         while let Ok(ev) = rx.try_recv() {
             if let AppEvent::InsertHistory(lines) = ev {
-                let s = lines.iter().flat_map(|l| l.spans.iter()).map(|sp| sp.content.clone()).collect::<Vec<_>>().join("");
-                if s.contains("codex") { saw_codex_post = true; break; }
+                let s = lines
+                    .iter()
+                    .flat_map(|l| l.spans.iter())
+                    .map(|sp| sp.content.clone())
+                    .collect::<Vec<_>>()
+                    .join("");
+                if s.contains("codex") {
+                    saw_codex_post = true;
+                    break;
+                }
             }
         }
-        assert!(saw_codex_post, "expected 'codex' header to be emitted after first newline commit");
+        assert!(
+            saw_codex_post,
+            "expected 'codex' header to be emitted after first newline commit"
+        );
 
         // Reasoning: header immediately
         let (mut chat2, rx2, _op_rx2) = make_chatwidget_manual();
         chat2.handle_codex_event(Event {
             id: "sub-b".into(),
-            msg: EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta: "Thinking".into() }),
+            msg: EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent {
+                delta: "Thinking".into(),
+            }),
         });
         let mut saw_thinking = false;
         while let Ok(ev) = rx2.try_recv() {
             if let AppEvent::InsertHistory(lines) = ev {
-                let s = lines.iter().flat_map(|l| l.spans.iter()).map(|sp| sp.content.clone()).collect::<Vec<_>>().join("");
-                if s.contains("thinking") { saw_thinking = true; break; }
+                let s = lines
+                    .iter()
+                    .flat_map(|l| l.spans.iter())
+                    .map(|sp| sp.content.clone())
+                    .collect::<Vec<_>>()
+                    .join("");
+                if s.contains("thinking") {
+                    saw_thinking = true;
+                    break;
+                }
             }
         }
-        assert!(saw_thinking, "expected 'thinking' header to be emitted at stream start");
+        assert!(
+            saw_thinking,
+            "expected 'thinking' header to be emitted at stream start"
+        );
     }
 }

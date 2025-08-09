@@ -1,10 +1,11 @@
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use codex_core::config::Config;
-use codex_core::protocol::{Event, Op};
+use codex_core::protocol::Op;
 use lazy_static::lazy_static;
 use serde::Serialize;
 use serde_json::json;
@@ -32,19 +33,34 @@ impl SessionLogger {
         }
 
         let file = opts.open(path)?;
-        let mut guard = self.file.lock().unwrap();
+        let mut guard = match self.file.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         *guard = Some(file);
         Ok(())
     }
 
     fn write_json_line(&self, value: serde_json::Value) {
-        if let Some(file) = self.file.lock().unwrap().as_mut() {
+        let mut guard = match self.file.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(file) = guard.as_mut() {
             if let Ok(serialized) = serde_json::to_string(&value) {
                 let _ = file.write_all(serialized.as_bytes());
                 let _ = file.write_all(b"\n");
                 let _ = file.flush();
             }
         }
+    }
+
+    fn is_enabled(&self) -> bool {
+        let guard = match self.file.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.is_some()
     }
 }
 
@@ -68,7 +84,10 @@ pub(crate) fn maybe_init(config: &Config) {
             Ok(dir) => dir,
             Err(_) => std::env::temp_dir(),
         };
-        let filename = format!("session-{}.jsonl", chrono::Utc::now().format("%Y%m%dT%H%M%SZ"));
+        let filename = format!(
+            "session-{}.jsonl",
+            chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+        );
         p.push(filename);
         p
     };
@@ -93,7 +112,7 @@ pub(crate) fn maybe_init(config: &Config) {
 
 pub(crate) fn log_inbound_app_event(event: &AppEvent) {
     // Log only if enabled
-    if LOGGER.file.lock().unwrap().is_none() {
+    if !LOGGER.is_enabled() {
         return;
     }
 
@@ -172,7 +191,7 @@ pub(crate) fn log_inbound_app_event(event: &AppEvent) {
                 "ts": now_ts(),
                 "dir": "to_tui",
                 "kind": "app_event",
-                "variant": format!("{:?}", other).split('(').next().unwrap_or("app_event"),
+                "variant": format!("{other:?}").split('(').next().unwrap_or("app_event"),
             });
             LOGGER.write_json_line(value);
         }
@@ -180,14 +199,14 @@ pub(crate) fn log_inbound_app_event(event: &AppEvent) {
 }
 
 pub(crate) fn log_outbound_op(op: &Op) {
-    if LOGGER.file.lock().unwrap().is_none() {
+    if !LOGGER.is_enabled() {
         return;
     }
     write_record("from_tui", "op", op);
 }
 
 pub(crate) fn log_session_end() {
-    if LOGGER.file.lock().unwrap().is_none() {
+    if !LOGGER.is_enabled() {
         return;
     }
     let value = json!({
@@ -210,5 +229,3 @@ where
     });
     LOGGER.write_json_line(value);
 }
-
-

@@ -25,13 +25,6 @@ impl MarkdownNewlineCollector {
         self.committed_line_count = 0;
     }
 
-    /// Replace the entire buffered content with `s`, resetting commit state.
-    pub fn replace_with(&mut self, s: &str) {
-        self.buffer.clear();
-        self.buffer.push_str(s);
-        self.committed_line_count = 0;
-    }
-
     /// Returns the number of rendered logical lines that were previously committed.
     pub fn committed_count(&self) -> usize {
         self.committed_line_count
@@ -226,7 +219,7 @@ fn unwrap_markdown_language_fence_if_enabled(s: String) -> String {
     // Recognizes common forms like ```markdown, ```md (any case), optional
     // surrounding whitespace, and flexible trailing newlines/CRLF.
     // If the block is not recognized, return the input unchanged.
-    let mut lines = s.lines().collect::<Vec<_>>();
+    let lines = s.lines().collect::<Vec<_>>();
     if lines.len() < 2 {
         return s;
     }
@@ -253,8 +246,8 @@ fn unwrap_markdown_language_fence_if_enabled(s: String) -> String {
 
     // Reconstruct the inner content between the fences.
     let mut out = String::new();
-    for i in 1..last_idx {
-        out.push_str(lines[i]);
+    for l in lines.iter().take(last_idx).skip(1) {
+        out.push_str(l);
         out.push('\n');
     }
     out
