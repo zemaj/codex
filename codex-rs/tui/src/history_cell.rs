@@ -199,22 +199,10 @@ impl HistoryCell {
         let total = lines.len();
         let limit = TOOL_CALL_MAX_LINES;
 
-        if total < 3 * limit {
-            let mut out = Vec::new();
-            for (i, raw) in lines.iter().enumerate() {
-                let mut line = ansi_escape_line(raw);
-                let prefix = if i == 0 { "  ⎿ " } else { "    " };
-                line.spans.insert(0, prefix.into());
-                line.spans.iter_mut().for_each(|span| {
-                    span.style = span.style.add_modifier(Modifier::DIM);
-                });
-                out.push(line);
-            }
-            return out;
-        }
-
         let mut out = Vec::new();
-        for (i, raw) in lines.iter().take(limit).enumerate() {
+
+        let head_end = total.min(limit);
+        for (i, raw) in lines[..head_end].iter().enumerate() {
             let mut line = ansi_escape_line(raw);
             let prefix = if i == 0 { "  ⎿ " } else { "    " };
             line.spans.insert(0, prefix.into());
@@ -224,15 +212,19 @@ impl HistoryCell {
             out.push(line);
         }
 
-        let omitted = total - 2 * limit;
-        let mut more = Line::from(format!("… +{omitted} lines"));
-        more.spans.insert(0, "    ".into());
-        more.spans.iter_mut().for_each(|span| {
-            span.style = span.style;
-        });
-        out.push(more);
+        // If we will ellipsize less than the limit, just show it.
+        let show_ellipsis = total > 2 * limit;
+        if show_ellipsis {
+            let omitted = total - 2 * limit;
+            out.push(Line::from(format!("… +{omitted} lines")));
+        }
 
-        for raw in lines.iter().skip(total - limit) {
+        let tail_start = if show_ellipsis {
+            total - limit
+        } else {
+            head_end
+        };
+        for raw in lines[tail_start..].iter() {
             let mut line = ansi_escape_line(raw);
             line.spans.insert(0, "    ".into());
             line.spans.iter_mut().for_each(|span| {
