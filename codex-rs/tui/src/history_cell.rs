@@ -349,22 +349,31 @@ impl HistoryCell {
         list_commands: &[ParsedCommand],
         output: Option<&CommandOutput>,
     ) -> Vec<Line<'static>> {
-        let paths: HashSet<&String> = list_commands
+        let paths: HashSet<String> = list_commands
             .iter()
             .flat_map(|c| match c {
-                ParsedCommand::Ls { path, .. } => path.as_ref(),
+                ParsedCommand::Ls { path, cmd } => match path {
+                    Some(p) => Some(p.clone()),
+                    None => Some(cmd.join(" ")),
+                },
                 _ => None,
             })
             .collect();
 
         let mut lines: Vec<Line> = vec![Line::from("📂 Listing")];
 
-        for name in paths {
-            lines.push(Line::from(vec![
-                Span::styled("  L ", Style::default().fg(Color::Gray)),
-                Span::styled(name.clone(), Style::default().fg(LIGHT_BLUE)),
-            ]));
+        match paths.len() {
+            0 => {}
+            _ => {
+                for name in paths {
+                    lines.push(Line::from(vec![
+                        Span::styled("  L ", Style::default().fg(Color::Gray)),
+                        Span::styled(name, Style::default().fg(LIGHT_BLUE)),
+                    ]));
+                }
+            }
         }
+
         lines.extend(output_lines(output, true, false));
         lines.push(Line::from(""));
 
