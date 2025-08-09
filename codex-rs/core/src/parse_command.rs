@@ -18,7 +18,6 @@ pub enum ParsedCommand {
         cmd: Vec<String>,
         query: Option<String>,
         path: Option<String>,
-        files_only: bool,
     },
     Format {
         cmd: Vec<String>,
@@ -95,13 +94,11 @@ mod tests {
                     cmd: vec_str(&["rg", "--files"]),
                     query: None,
                     path: None,
-                    files_only: true,
                 },
                 ParsedCommand::Search {
                     cmd: vec_str(&["rg", "--files"]),
                     query: None,
                     path: None,
-                    files_only: true,
                 },
                 ParsedCommand::Unknown {
                     cmd: vec_str(&["pnpm", "-v"]),
@@ -113,7 +110,6 @@ mod tests {
                     cmd: vec_str(&["rg", "--version"]),
                     query: None,
                     path: None,
-                    files_only: false,
                 },
             ],
         );
@@ -128,7 +124,6 @@ mod tests {
                 cmd: shlex_split_safe(inner),
                 query: Some("navigate-to-route".to_string()),
                 path: None,
-                files_only: false,
             }],
         );
         Ok(())
@@ -147,7 +142,6 @@ mod tests {
                     cmd: vec_str(&["rg", "-n", "BUG|FIXME|TODO|XXX|HACK", "-S"]),
                     query: Some("BUG|FIXME|TODO|XXX|HACK".to_string()),
                     path: None,
-                    files_only: false,
                 },
             ],
         );
@@ -162,7 +156,6 @@ mod tests {
                 cmd: vec_str(&["rg", "--files", "webview/src"]),
                 query: None,
                 path: Some("webview".to_string()),
-                files_only: true,
             }],
         );
     }
@@ -180,7 +173,6 @@ mod tests {
                     cmd: vec_str(&["rg", "--files"]),
                     query: None,
                     path: None,
-                    files_only: true,
                 },
             ],
         );
@@ -307,7 +299,6 @@ mod tests {
                 cmd: vec_str(&["grep", "-R", "CODEX_SANDBOX_ENV_VAR", "-n", "."]),
                 query: Some("CODEX_SANDBOX_ENV_VAR".to_string()),
                 path: Some(".".to_string()),
-                files_only: false,
             }],
         );
     }
@@ -332,7 +323,6 @@ mod tests {
                 ]),
                 query: Some("CODEX_SANDBOX_ENV_VAR".to_string()),
                 path: Some("spawn.rs".to_string()),
-                files_only: false,
             }],
         );
     }
@@ -347,7 +337,6 @@ mod tests {
                 cmd: vec_str(&["grep", "-R", "src/main.rs", "-n", "."]),
                 query: Some("src/main.rs".to_string()),
                 path: Some(".".to_string()),
-                files_only: false,
             }],
         );
     }
@@ -360,7 +349,6 @@ mod tests {
                 cmd: vec_str(&["grep", "-R", "COD`EX_SANDBOX", "-n"]),
                 query: Some("COD`EX_SANDBOX".to_string()),
                 path: None,
-                files_only: false,
             }],
         );
     }
@@ -377,7 +365,6 @@ mod tests {
                     cmd: vec_str(&["rg", "--files"]),
                     query: None,
                     path: None,
-                    files_only: true,
                 },
             ],
         );
@@ -680,7 +667,6 @@ mod tests {
                 cmd: vec_str(&["rg", "--files"]),
                 query: None,
                 path: None,
-                files_only: true,
             }],
         );
     }
@@ -710,7 +696,6 @@ mod tests {
                 cmd: shlex_split_safe("rg -n 'foo bar' -S"),
                 query: Some("foo bar".to_string()),
                 path: None,
-                files_only: false,
             }],
         );
     }
@@ -735,7 +720,6 @@ mod tests {
                     cmd: shlex_split_safe("rg foo"),
                     query: Some("foo".to_string()),
                     path: None,
-                    files_only: false,
                 },
                 ParsedCommand::Unknown {
                     cmd: shlex_split_safe("echo done"),
@@ -754,7 +738,6 @@ mod tests {
                     cmd: shlex_split_safe("rg foo"),
                     query: Some("foo".to_string()),
                     path: None,
-                    files_only: false,
                 },
                 ParsedCommand::Unknown {
                     cmd: shlex_split_safe("echo done"),
@@ -796,7 +779,6 @@ mod tests {
                     cmd: shlex_split_safe("rg --files"),
                     query: None,
                     path: None,
-                    files_only: true,
                 },
                 ParsedCommand::Unknown {
                     cmd: shlex_split_safe("head -n 1"),
@@ -981,7 +963,6 @@ mod tests {
                 cmd: shlex_split_safe("grep -R TODO src"),
                 query: Some("TODO".to_string()),
                 path: Some("src".to_string()),
-                files_only: false,
             }],
         );
     }
@@ -994,7 +975,6 @@ mod tests {
                 cmd: shlex_split_safe("rg --colors=never -n foo src"),
                 query: Some("foo".to_string()),
                 path: Some("src".to_string()),
-                files_only: false,
             }],
         );
     }
@@ -1029,7 +1009,6 @@ mod tests {
                 cmd: shlex_split_safe("rg --files"),
                 query: None,
                 path: None,
-                files_only: true,
             }],
         );
     }
@@ -1072,14 +1051,12 @@ mod tests {
 
     #[test]
     fn fd_file_finder_variants() {
-        // fd with only a path should set files_only and capture the path
         assert_parsed(
             &shlex_split_safe("fd -t f src/"),
             vec![ParsedCommand::Search {
                 cmd: shlex_split_safe("fd -t f src/"),
                 query: None,
                 path: Some("src".to_string()),
-                files_only: true,
             }],
         );
 
@@ -1090,7 +1067,6 @@ mod tests {
                 cmd: shlex_split_safe("fd main src"),
                 query: Some("main".to_string()),
                 path: Some("src".to_string()),
-                files_only: true,
             }],
         );
     }
@@ -1103,7 +1079,6 @@ mod tests {
                 cmd: shlex_split_safe("find . -name '*.rs'"),
                 query: Some("*.rs".to_string()),
                 path: Some(".".to_string()),
-                files_only: true,
             }],
         );
     }
@@ -1116,7 +1091,6 @@ mod tests {
                 cmd: shlex_split_safe("find src -type f"),
                 query: None,
                 path: Some("src".to_string()),
-                files_only: true,
             }],
         );
     }
@@ -1561,25 +1535,14 @@ fn parse_bash_lc_commands(
                                     }
                                 }
                             }
-                            ParsedCommand::Search {
-                                cmd,
-                                query,
-                                path,
-                                files_only,
-                            } => {
+                            ParsedCommand::Search { cmd, query, path } => {
                                 if had_connectors {
-                                    ParsedCommand::Search {
-                                        cmd,
-                                        query,
-                                        path,
-                                        files_only,
-                                    }
+                                    ParsedCommand::Search { cmd, query, path }
                                 } else {
                                     ParsedCommand::Search {
                                         cmd: script_tokens.clone(),
                                         query,
                                         path,
-                                        files_only,
                                     }
                                 }
                             }
@@ -1823,34 +1786,24 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
         }
         Some((head, tail)) if head == "rg" => {
             let args_no_connector = trim_at_connector(tail);
-            let files_only = args_no_connector.iter().any(|a| a == "--files");
             let non_flags: Vec<&String> = args_no_connector
                 .iter()
                 .filter(|p| !p.starts_with('-'))
                 .collect();
-            let (query, path) = if files_only {
-                let p = non_flags.first().map(|s| short_display_path(s));
-                (None, p)
-            } else {
-                let q = non_flags.first().cloned().map(|s| s.to_string());
-                let p = non_flags.get(1).map(|s| short_display_path(s));
-                (q, p)
-            };
+            let query = non_flags.first().cloned().map(|s| s.to_string());
+            let path = non_flags.get(1).map(|s| short_display_path(s));
             ParsedCommand::Search {
                 cmd: main_cmd.to_vec(),
                 query,
                 path,
-                files_only,
             }
         }
         Some((head, tail)) if head == "fd" => {
-            // fd is a file finder; treat results as files_only
             let (query, path) = parse_fd_query_and_path(tail);
             ParsedCommand::Search {
                 cmd: main_cmd.to_vec(),
                 query,
                 path,
-                files_only: true,
             }
         }
         Some((head, tail)) if head == "find" => {
@@ -1860,7 +1813,6 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
                 cmd: main_cmd.to_vec(),
                 query,
                 path,
-                files_only: true,
             }
         }
         Some((head, tail)) if head == "grep" => {
@@ -1877,7 +1829,6 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
                 cmd: main_cmd.to_vec(),
                 query,
                 path,
-                files_only: false,
             }
         }
         Some((head, tail)) if head == "cat" => {

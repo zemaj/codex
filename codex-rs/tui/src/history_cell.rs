@@ -34,7 +34,6 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::WidgetRef;
 use ratatui::widgets::Wrap;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -291,270 +290,45 @@ impl HistoryCell {
         parsed: &[ParsedCommand],
         output: Option<&CommandOutput>,
     ) -> Vec<Line<'static>> {
-        let all = |pred: fn(&ParsedCommand) -> bool| -> bool {
-            !parsed.is_empty() && parsed.iter().all(&pred)
-        };
-
-        // Only render a typed cell if all of the parsed commands are of the same type.
-        match () {
-            _ if all(|c| matches!(c, ParsedCommand::Read { .. })) => {
-                HistoryCell::new_read_command(parsed, output)
-            }
-            _ if all(|c| matches!(c, ParsedCommand::Ls { .. })) => {
-                HistoryCell::new_list_command(parsed, output)
-            }
-            _ if all(|c| matches!(c, ParsedCommand::Search { .. })) => {
-                HistoryCell::new_search_command(parsed, output)
-            }
-            _ if all(|c| matches!(c, ParsedCommand::Format { .. })) => {
-                HistoryCell::new_format_command(parsed, output)
-            }
-            _ if all(|c| matches!(c, ParsedCommand::Lint { .. })) => {
-                HistoryCell::new_lint_command(parsed, output)
-            }
-            _ if all(|c| matches!(c, ParsedCommand::Test { .. })) => {
-                HistoryCell::new_test_command(parsed, output)
-            }
-            _ => HistoryCell::new_exec_command_generic(command, output),
+        match parsed.is_empty() {
+            true => HistoryCell::new_exec_command_generic(command, output),
+            false => HistoryCell::new_parsed_command(parsed, output),
         }
     }
 
-    fn new_read_command(
-        read_commands: &[ParsedCommand],
+    fn new_parsed_command(
+        parsed_commands: &[ParsedCommand],
         output: Option<&CommandOutput>,
     ) -> Vec<Line<'static>> {
-        let file_names: HashSet<&String> = read_commands
-            .iter()
-            .flat_map(|c| match c {
-                ParsedCommand::Read { name, .. } => Some(name),
-                _ => None,
-            })
-            .collect();
+        let mut lines: Vec<Line> = vec![Line::from("⚙︎ Working")];
 
-        let mut lines: Vec<Line> = vec![Line::from("📖 Reading")];
-
-        for name in file_names {
-            lines.push(Line::from(vec![
-                Span::styled("  L ", Style::default().fg(Color::Gray)),
-                Span::styled(name.clone(), Style::default().fg(LIGHT_BLUE)),
-            ]));
-        }
-        lines.extend(output_lines(output, true, false));
-        lines.push(Line::from(""));
-
-        lines
-    }
-
-    fn new_list_command(
-        list_commands: &[ParsedCommand],
-        output: Option<&CommandOutput>,
-    ) -> Vec<Line<'static>> {
-        let paths: HashSet<String> = list_commands
-            .iter()
-            .flat_map(|c| match c {
-                ParsedCommand::Ls { path, cmd } => match path {
-                    Some(p) => Some(p.clone()),
-                    None => Some(cmd.join(" ")),
+        for (i, parsed) in parsed_commands.iter().enumerate() {
+            let str = match parsed {
+                ParsedCommand::Read { name, .. } => format!("📖 {name}"),
+                ParsedCommand::Ls { cmd, path } => match path {
+                    Some(p) => format!("📂 {p}"),
+                    None => format!("📂 {}", cmd.join(" ")),
                 },
-                _ => None,
-            })
-            .collect();
+                ParsedCommand::Search { query, path, cmd } => match (query, path) {
+                    (Some(q), Some(p)) => format!("🔎 {q} in {p}"),
+                    (Some(q), None) => format!("🔎 {q}"),
+                    (None, Some(p)) => format!("🔎 {p}"),
+                    (None, None) => format!("🔎 {}", cmd.join(" ")),
+                },
+                ParsedCommand::Format { .. } => "✨ Formatting".to_string(),
+                ParsedCommand::Test { cmd } => format!("🧪 {}", cmd.join(" ")),
+                ParsedCommand::Lint { cmd, .. } => format!("🧹 {}", cmd.join(" ")),
+                ParsedCommand::Unknown { cmd } => format!("⌨️ {}", cmd.join(" ")),
+            };
 
-        let mut lines: Vec<Line> = vec![Line::from("📂 Listing")];
-
-        match paths.len() {
-            0 => {}
-            _ => {
-                for name in paths {
-                    lines.push(Line::from(vec![
-                        Span::styled("  L ", Style::default().fg(Color::Gray)),
-                        Span::styled(name, Style::default().fg(LIGHT_BLUE)),
-                    ]));
-                }
-            }
-        }
-
-        lines.extend(output_lines(output, true, false));
-        lines.push(Line::from(""));
-
-        lines
-    }
-
-    fn new_search_command(
-        search_commands: &[ParsedCommand],
-        output: Option<&CommandOutput>,
-    ) -> Vec<Line<'static>> {
-        let file_names: HashSet<&String> = search_commands
-            .iter()
-            .flat_map(|c| match c {
-                ParsedCommand::Read { name, .. } => Some(name),
-                _ => None,
-            })
-            .collect();
-
-        let mut lines: Vec<Line> = vec![Line::from("🔎 Searching")];
-
-        match file_names.len() {
-            0 => {
-                // We couldn't extract names from the cmd so display the raw cmd.
-                for cmd in search_commands {
-                    if let ParsedCommand::Search { cmd, .. } = cmd {
-                        lines.push(Line::from(vec![
-                            Span::styled("  L ", Style::default().fg(Color::Gray)),
-                            Span::styled(cmd.join(" "), Style::default().fg(LIGHT_BLUE)),
-                        ]));
-                    }
-                }
-            }
-            _ => {
-                for name in file_names {
-                    lines.push(Line::from(vec![
-                        Span::styled("  L ", Style::default().fg(Color::Gray)),
-                        Span::styled(name.clone(), Style::default().fg(LIGHT_BLUE)),
-                    ]));
-                }
-            }
-        }
-        lines.extend(output_lines(output, true, false));
-        lines.push(Line::from(""));
-
-        lines
-    }
-
-    fn new_format_command(
-        format_commands: &[ParsedCommand],
-        output: Option<&CommandOutput>,
-    ) -> Vec<Line<'static>> {
-        use std::collections::BTreeSet;
-        let mut tools: BTreeSet<String> = BTreeSet::new();
-        let mut targets: BTreeSet<String> = BTreeSet::new();
-        for c in format_commands {
-            if let ParsedCommand::Format {
-                tool, targets: t, ..
-            } = c
-            {
-                if let Some(tool) = tool {
-                    tools.insert(tool.clone());
-                }
-                if let Some(t) = t {
-                    for it in t {
-                        targets.insert(it.clone());
-                    }
-                }
-            }
-        }
-
-        let mut lines: Vec<Line> = vec![Line::from("✨ Formatting")];
-
-        if !tools.is_empty() {
-            let mut first = true;
-            for tool in tools {
-                let prefix = if first { "  ⎿ " } else { "    " };
-                first = false;
-                lines.push(Line::from(vec![prefix.into(), tool.magenta()]));
-            }
-        }
-
-        for name in targets {
+            let prefix = if i == 0 { "  L " } else { "    " };
             lines.push(Line::from(vec![
-                Span::styled("    ", Style::default().fg(Color::Gray)),
-                Span::styled(name, Style::default().fg(LIGHT_BLUE)),
+                Span::styled(prefix, Style::default().add_modifier(Modifier::DIM)),
+                Span::styled(str, Style::default().fg(LIGHT_BLUE)),
             ]));
         }
+
         lines.extend(output_lines(output, true, false));
-        lines.push(Line::from(""));
-
-        lines
-    }
-
-    fn new_lint_command(
-        lint_commands: &[ParsedCommand],
-        output: Option<&CommandOutput>,
-    ) -> Vec<Line<'static>> {
-        use std::collections::BTreeSet;
-        let mut tools: BTreeSet<String> = BTreeSet::new();
-        let mut targets: BTreeSet<String> = BTreeSet::new();
-        for c in lint_commands {
-            if let ParsedCommand::Lint {
-                tool, targets: t, ..
-            } = c
-            {
-                if let Some(tool) = tool {
-                    tools.insert(tool.clone());
-                }
-                if let Some(t) = t {
-                    for it in t {
-                        targets.insert(it.clone());
-                    }
-                }
-            }
-        }
-
-        let mut lines: Vec<Line> = vec![Line::from("🧹 Linting")];
-
-        if !tools.is_empty() {
-            let mut first = true;
-            for tool in tools {
-                let prefix = if first { "  ⎿ " } else { "    " };
-                first = false;
-                lines.push(Line::from(vec![
-                    prefix.into(),
-                    "Tool: ".into(),
-                    tool.magenta(),
-                ]));
-            }
-        }
-
-        for name in targets {
-            lines.push(Line::from(vec![
-                Span::styled("    ", Style::default().fg(Color::Gray)),
-                Span::styled(name, Style::default().fg(LIGHT_BLUE)),
-            ]));
-        }
-        lines.extend(output_lines(output, true, false));
-        lines.push(Line::from(""));
-
-        lines
-    }
-
-    fn new_test_command(
-        test_commands: &[ParsedCommand],
-        output: Option<&CommandOutput>,
-    ) -> Vec<Line<'static>> {
-        use std::collections::BTreeSet;
-        let mut cmds: BTreeSet<String> = BTreeSet::new();
-        for c in test_commands {
-            if let ParsedCommand::Test { cmd, .. } = c {
-                cmds.insert(cmd.join(" "));
-            }
-        }
-
-        if cmds.is_empty() {
-            for c in test_commands {
-                if let ParsedCommand::Test { cmd, .. } = c {
-                    cmds.insert(cmd.join(" "));
-                }
-            }
-        }
-        let mut lines: Vec<Line> = vec![Line::from("🧪 Testing")];
-
-        let mut first = true;
-        for f in cmds.into_iter().take(10) {
-            if first {
-                lines.push(Line::from(vec![
-                    "  ⎿ ".into(),
-                    Span::styled(f, Style::default().fg(LIGHT_BLUE)),
-                ]));
-                first = false;
-            } else {
-                lines.push(Line::from(vec![
-                    Span::styled("    ", Style::default().fg(Color::Gray)),
-                    Span::styled(f, Style::default().fg(LIGHT_BLUE)),
-                ]));
-            }
-        }
-        lines.extend(output_lines(output, true, false));
-
         lines.push(Line::from(""));
 
         lines
