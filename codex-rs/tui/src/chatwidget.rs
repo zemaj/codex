@@ -1,9 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use codex_core::codex_wrapper::CodexConversation;
-use codex_core::codex_wrapper::init_codex;
 use codex_core::config::Config;
 use codex_core::protocol::AgentMessageDeltaEvent;
 use codex_core::protocol::AgentMessageEvent;
@@ -36,6 +33,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
 use tokio::sync::mpsc::UnboundedSender;
+#[cfg(test)]
 use tokio::sync::mpsc::unbounded_channel;
 use tracing::debug;
 
@@ -53,14 +51,12 @@ use crate::history_cell::PatchEventType;
 use crate::user_approval_widget::ApprovalRequest;
 mod interrupts;
 use self::interrupts::InterruptManager;
+mod agent;
+use self::agent::spawn_agent;
 use codex_file_search::FileMatch;
 use crate::streaming::controller::{AppEventHistorySink, StreamController};
 
-struct RunningCommand {
-    command: Vec<String>,
-    #[allow(dead_code)]
-    cwd: PathBuf,
-}
+// Simplified: track only the command arguments for running exec calls.
 
 pub(crate) struct ChatWidget<'a> {
     app_event_tx: AppEventSender,
@@ -73,10 +69,12 @@ pub(crate) struct ChatWidget<'a> {
     last_token_usage: TokenUsage,
     // Stream lifecycle controller
     stream: StreamController,
-    running_commands: HashMap<String, RunningCommand>,
+    running_commands: HashMap<String, Vec<String>>, 
     task_complete_pending: bool,
     // Queue of interruptive UI events deferred during an active write cycle
     interrupts: InterruptManager,
+    // Whether a redraw is needed after handling the current event
+    needs_redraw: bool,
 }
 
 struct UserMessage {
@@ -106,6 +104,209 @@ fn create_initial_user_message(text: String, image_paths: Vec<PathBuf>) -> Optio
 }
 
 impl ChatWidget<'_> {
+    #[inline]
+    fn mark_needs_redraw(&mut self) {
+        self.needs_redraw = true;
+    }
+    // --- Small event handlers ---
+    fn on_session_configured(&mut self, event: codex_core::protocol::SessionConfiguredEvent) {
+        self.bottom_pane
+            .set_history_metadata(event.history_log_id, event.history_entry_count);
+        self.add_to_history(HistoryCell::new_session_info(&self.config, event, true));
+        if let Some(user_message) = self.initial_user_message.take() {
+            self.submit_user_message(user_message);
+        }
+        self.mark_needs_redraw();
+    }
+
+    fn on_agent_message(&mut self, message: String) {
+        let sink = AppEventHistorySink(self.app_event_tx.clone());
+        let finished = self.stream.apply_final_answer(&message, &sink);
+        if finished {
+            if self.task_complete_pending {
+                self.bottom_pane.set_task_running(false);
+                self.task_complete_pending = false;
+            }
+            self.flush_interrupt_queue();
+        }
+        self.mark_needs_redraw();
+    }
+
+    fn on_agent_message_delta(&mut self, delta: String) {
+        let sink = AppEventHistorySink(self.app_event_tx.clone());
+        self.bottom_pane
+            .update_status_text("waiting for model".to_string());
+        self.stream.begin(StreamKind::Answer, &sink);
+        self.stream.push_and_maybe_commit(&delta, &sink);
+        self.mark_needs_redraw();
+    }
+
+    fn on_agent_reasoning_delta(&mut self, delta: String) {
+        let sink = AppEventHistorySink(self.app_event_tx.clone());
+        self.bottom_pane
+            .update_status_text("waiting for model".to_string());
+        self.stream.begin(StreamKind::Reasoning, &sink);
+        self.stream.push_and_maybe_commit(&delta, &sink);
+        self.mark_needs_redraw();
+    }
+
+    fn on_agent_reasoning_final(&mut self) {
+        let sink = AppEventHistorySink(self.app_event_tx.clone());
+        let finished = self.stream.finalize(StreamKind::Reasoning, false, &sink);
+        if finished {
+            if self.task_complete_pending {
+                self.bottom_pane.set_task_running(false);
+                self.task_complete_pending = false;
+            }
+            self.flush_interrupt_queue();
+        }
+        self.mark_needs_redraw();
+    }
+
+    fn on_reasoning_section_break(&mut self) {
+        let sink = AppEventHistorySink(self.app_event_tx.clone());
+        self.stream.insert_reasoning_section_break(&sink);
+    }
+
+    // Raw reasoning uses the same flow as summarized reasoning
+
+    fn on_task_started(&mut self) {
+        self.bottom_pane.clear_ctrl_c_quit_hint();
+        self.bottom_pane.set_task_running(true);
+        self.bottom_pane
+            .update_status_text("waiting for model".to_string());
+        self.stream.reset_headers_for_new_turn();
+        self.mark_needs_redraw();
+    }
+
+    fn on_task_complete(&mut self) {
+        let streaming_active = self.stream.is_streaming_active();
+        if streaming_active {
+            self.task_complete_pending = true;
+        } else {
+            self.bottom_pane.set_task_running(false);
+            self.mark_needs_redraw();
+        }
+    }
+
+    fn on_token_count(&mut self, token_usage: TokenUsage) {
+        self.total_token_usage = add_token_usage(&self.total_token_usage, &token_usage);
+        self.last_token_usage = token_usage;
+        self.bottom_pane.set_token_usage(
+            self.total_token_usage.clone(),
+            self.last_token_usage.clone(),
+            self.config.model_context_window,
+        );
+    }
+
+    fn on_error(&mut self, message: String) {
+        self.add_to_history(HistoryCell::new_error_event(message));
+        self.bottom_pane.set_task_running(false);
+        self.stream.clear_all();
+        self.mark_needs_redraw();
+    }
+
+    fn on_plan_update(&mut self, update: codex_core::plan_tool::UpdatePlanArgs) {
+        self.add_to_history(HistoryCell::new_plan_update(update));
+    }
+
+    fn on_exec_approval_request(&mut self, id: String, ev: ExecApprovalRequestEvent) {
+        if self.is_write_cycle_active() {
+            self.interrupts.push_exec_approval(id, ev);
+        } else {
+            self.handle_exec_approval_now(id, ev);
+        }
+    }
+
+    fn on_apply_patch_approval_request(&mut self, id: String, ev: ApplyPatchApprovalRequestEvent) {
+        if self.is_write_cycle_active() {
+            self.interrupts.push_apply_patch_approval(id, ev);
+        } else {
+            self.handle_apply_patch_approval_now(id, ev);
+        }
+    }
+
+    fn on_exec_command_begin(&mut self, ev: ExecCommandBeginEvent) {
+        if self.is_write_cycle_active() {
+            self.interrupts.push_exec_begin(ev);
+        } else {
+            self.handle_exec_begin_now(ev);
+        }
+    }
+
+    fn on_exec_command_output_delta(
+        &mut self,
+        _ev: codex_core::protocol::ExecCommandOutputDeltaEvent,
+    ) {
+        // TODO: Handle streaming exec output if/when implemented
+    }
+
+    fn on_patch_apply_begin(&mut self, event: PatchApplyBeginEvent) {
+        self.add_to_history(HistoryCell::new_patch_event(
+            PatchEventType::ApplyBegin {
+                auto_approved: event.auto_approved,
+            },
+            event.changes,
+        ));
+    }
+
+    fn on_patch_apply_end(&mut self, event: codex_core::protocol::PatchApplyEndEvent) {
+        if event.success {
+            self.add_to_history(HistoryCell::new_patch_apply_success(event.stdout));
+        } else {
+            self.add_to_history(HistoryCell::new_patch_apply_failure(event.stderr));
+        }
+    }
+
+    fn on_exec_command_end(&mut self, ev: ExecCommandEndEvent) {
+        let cmd = self.running_commands.remove(&ev.call_id);
+        self.active_history_cell = None;
+        self.add_to_history(HistoryCell::new_completed_exec_command(
+            cmd.unwrap_or_else(|| vec![ev.call_id]),
+            CommandOutput {
+                exit_code: ev.exit_code,
+                stdout: ev.stdout,
+                stderr: ev.stderr,
+            },
+        ));
+    }
+
+    fn on_mcp_tool_call_begin(&mut self, ev: McpToolCallBeginEvent) {
+        if self.is_write_cycle_active() {
+            self.interrupts.push_mcp_begin(ev);
+        } else {
+            self.handle_mcp_begin_now(ev);
+        }
+    }
+
+    fn on_mcp_tool_call_end(&mut self, ev: McpToolCallEndEvent) {
+        if self.is_write_cycle_active() {
+            self.interrupts.push_mcp_end(ev);
+        } else {
+            self.handle_mcp_end_now(ev);
+        }
+    }
+
+    fn on_get_history_entry_response(
+        &mut self,
+        event: codex_core::protocol::GetHistoryEntryResponseEvent,
+    ) {
+        let codex_core::protocol::GetHistoryEntryResponseEvent { offset, log_id, entry } = event;
+        self.bottom_pane
+            .on_history_entry_response(log_id, offset, entry.map(|e| e.text));
+    }
+
+    fn on_shutdown_complete(&mut self) {
+        self.app_event_tx.send(AppEvent::ExitRequest);
+    }
+
+    fn on_turn_diff(&mut self, unified_diff: String) {
+        debug!("TurnDiffEvent: {unified_diff}");
+    }
+
+    fn on_background_event(&mut self, message: String) {
+        debug!("BackgroundEvent: {message}");
+    }
     /// Periodic tick to commit at most one queued line to history with a small delay,
     /// animating the output.
     pub(crate) fn on_commit_tick(&mut self) {
@@ -149,7 +350,7 @@ impl ChatWidget<'_> {
             reason: ev.reason,
         };
         self.bottom_pane.push_approval_request(request);
-        self.request_redraw();
+        self.mark_needs_redraw();
     }
 
     pub(crate) fn handle_apply_patch_approval_now(
@@ -168,20 +369,15 @@ impl ChatWidget<'_> {
             grant_root: ev.grant_root,
         };
         self.bottom_pane.push_approval_request(request);
-        self.request_redraw();
+        self.mark_needs_redraw();
     }
 
     pub(crate) fn handle_exec_begin_now(&mut self, ev: ExecCommandBeginEvent) {
         // Ensure the status indicator is visible while the command runs.
         self.bottom_pane
             .update_status_text("running command".to_string());
-        self.running_commands.insert(
-            ev.call_id.clone(),
-            RunningCommand {
-                command: ev.command.clone(),
-                cwd: ev.cwd.clone(),
-            },
-        );
+        self.running_commands
+            .insert(ev.call_id.clone(), ev.command.clone());
         self.active_history_cell = Some(HistoryCell::new_active_exec_command(ev.command));
     }
 
@@ -230,43 +426,7 @@ impl ChatWidget<'_> {
         initial_images: Vec<PathBuf>,
         enhanced_keys_supported: bool,
     ) -> Self {
-        let (codex_op_tx, mut codex_op_rx) = unbounded_channel::<Op>();
-
-        let app_event_tx_clone = app_event_tx.clone();
-        // Create the Codex asynchronously so the UI loads as quickly as possible.
-        let config_for_agent_loop = config.clone();
-        tokio::spawn(async move {
-            let CodexConversation {
-                codex,
-                session_configured,
-                ..
-            } = match init_codex(config_for_agent_loop).await {
-                Ok(vals) => vals,
-                Err(e) => {
-                    // TODO: surface this error to the user.
-                    tracing::error!("failed to initialize codex: {e}");
-                    return;
-                }
-            };
-
-            // Forward the captured `SessionInitialized` event that was consumed
-            // inside `init_codex()` so it can be rendered in the UI.
-            app_event_tx_clone.send(AppEvent::CodexEvent(session_configured.clone()));
-            let codex = Arc::new(codex);
-            let codex_clone = codex.clone();
-            tokio::spawn(async move {
-                while let Some(op) = codex_op_rx.recv().await {
-                    let id = codex_clone.submit(op).await;
-                    if let Err(e) = id {
-                        tracing::error!("failed to submit op: {e}");
-                    }
-                }
-            });
-
-            while let Ok(event) = codex.next_event().await {
-                app_event_tx_clone.send(AppEvent::CodexEvent(event));
-            }
-        });
+        let codex_op_tx = spawn_agent(config.clone(), app_event_tx.clone());
 
         Self {
             app_event_tx: app_event_tx.clone(),
@@ -288,6 +448,7 @@ impl ChatWidget<'_> {
             running_commands: HashMap::new(),
             task_complete_pending: false,
             interrupts: InterruptManager::new(),
+            needs_redraw: false,
         }
     }
 
@@ -359,235 +520,51 @@ impl ChatWidget<'_> {
     }
 
     pub(crate) fn handle_codex_event(&mut self, event: Event) {
+        // Reset redraw flag for this dispatch
+        self.needs_redraw = false;
         let Event { id, msg } = event;
         match msg {
-            EventMsg::SessionConfigured(event) => {
-                self.bottom_pane
-                    .set_history_metadata(event.history_log_id, event.history_entry_count);
-                // Record session information at the top of the conversation.
-                self.add_to_history(HistoryCell::new_session_info(&self.config, event, true));
-
-                if let Some(user_message) = self.initial_user_message.take() {
-                    // If the user provided an initial message, add it to the
-                    // conversation history.
-                    self.submit_user_message(user_message);
-                }
-
-                self.request_redraw();
-            }
+            EventMsg::SessionConfigured(e) => self.on_session_configured(e),
             EventMsg::AgentMessage(AgentMessageEvent { message }) => {
-                let sink = AppEventHistorySink(self.app_event_tx.clone());
-                let finished = self.stream.apply_final_answer(&message, &sink);
-                if finished {
-                    if self.task_complete_pending {
-                        self.bottom_pane.set_task_running(false);
-                        self.task_complete_pending = false;
-                    }
-                    self.flush_interrupt_queue();
-                }
-                self.request_redraw();
+                self.on_agent_message(message)
             }
             EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }) => {
-                let sink = AppEventHistorySink(self.app_event_tx.clone());
-                // Ensure the waiting status is visible (composer replaced).
-                self.bottom_pane
-                    .update_status_text("waiting for model".to_string());
-                self.stream.begin(StreamKind::Answer, &sink);
-                self.stream.push_and_maybe_commit(&delta, &sink);
-                self.request_redraw();
+                self.on_agent_message_delta(delta)
             }
-            EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta }) => {
-                // Stream CoT into the live pane; keep input visible and commit
-                // overflow rows incrementally to scrollback.
-                let sink = AppEventHistorySink(self.app_event_tx.clone());
-                self.bottom_pane
-                    .update_status_text("waiting for model".to_string());
-                self.stream.begin(StreamKind::Reasoning, &sink);
-                self.stream.push_and_maybe_commit(&delta, &sink);
-                self.request_redraw();
+            EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta })
+            | EventMsg::AgentReasoningRawContentDelta(AgentReasoningRawContentDeltaEvent { delta }) => {
+                self.on_agent_reasoning_delta(delta)
             }
-            EventMsg::AgentReasoning(AgentReasoningEvent { text: _ }) => {
-                // Final reasoning: commit remaining rows and close with a blank.
-                // Keep animation for reasoning; no need to flush immediately.
-                let sink = AppEventHistorySink(self.app_event_tx.clone());
-                let finished = self
-                    .stream
-                    .finalize(StreamKind::Reasoning, false, &sink);
-                if finished {
-                    if self.task_complete_pending {
-                        self.bottom_pane.set_task_running(false);
-                        self.task_complete_pending = false;
-                    }
-                    self.flush_interrupt_queue();
-                }
-                self.request_redraw();
+            EventMsg::AgentReasoning(AgentReasoningEvent { .. })
+            | EventMsg::AgentReasoningRawContent(AgentReasoningRawContentEvent { .. }) => {
+                self.on_agent_reasoning_final()
             }
-            EventMsg::AgentReasoningSectionBreak(_) => {
-                // Ensure the next reasoning section starts on its own, and avoid duplicating separators.
-                let sink = AppEventHistorySink(self.app_event_tx.clone());
-                self.stream.insert_reasoning_section_break(&sink);
-            }
-            EventMsg::AgentReasoningRawContentDelta(AgentReasoningRawContentDeltaEvent {
-                delta,
-            }) => {
-                // Treat raw reasoning content the same as summarized reasoning for UI flow.
-                let sink = AppEventHistorySink(self.app_event_tx.clone());
-                self.bottom_pane
-                    .update_status_text("waiting for model".to_string());
-                self.stream.begin(StreamKind::Reasoning, &sink);
-                self.stream.push_and_maybe_commit(&delta, &sink);
-                self.request_redraw();
-            }
-            EventMsg::AgentReasoningRawContent(AgentReasoningRawContentEvent { text: _ }) => {
-                // Finalize the raw reasoning stream just like the summarized reasoning event.
-                let sink = AppEventHistorySink(self.app_event_tx.clone());
-                let finished = self
-                    .stream
-                    .finalize(StreamKind::Reasoning, false, &sink);
-                if finished {
-                    if self.task_complete_pending {
-                        self.bottom_pane.set_task_running(false);
-                        self.task_complete_pending = false;
-                    }
-                    self.flush_interrupt_queue();
-                }
-                self.request_redraw();
-            }
-            EventMsg::TaskStarted => {
-                self.bottom_pane.clear_ctrl_c_quit_hint();
-                self.bottom_pane.set_task_running(true);
-                // Replace composer with single-line spinner while waiting.
-                self.bottom_pane
-                    .update_status_text("waiting for model".to_string());
-                // New turn: reset header emission state so each header can be emitted once.
-                self.stream.reset_headers_for_new_turn();
-                self.request_redraw();
-            }
-            EventMsg::TaskComplete(TaskCompleteEvent {
-                last_agent_message: _,
-            }) => {
-                // Defer clearing status/live ring until streaming fully completes.
-                let streaming_active = self.stream.is_streaming_active();
-                if streaming_active {
-                    self.task_complete_pending = true;
-                } else {
-                    self.bottom_pane.set_task_running(false);
-                    self.request_redraw();
-                }
-            }
-            EventMsg::TokenCount(token_usage) => {
-                self.total_token_usage = add_token_usage(&self.total_token_usage, &token_usage);
-                self.last_token_usage = token_usage;
-                self.bottom_pane.set_token_usage(
-                    self.total_token_usage.clone(),
-                    self.last_token_usage.clone(),
-                    self.config.model_context_window,
-                );
-            }
-            EventMsg::Error(ErrorEvent { message }) => {
-                self.add_to_history(HistoryCell::new_error_event(message.clone()));
-                self.bottom_pane.set_task_running(false);
-                self.stream.clear_all();
-                self.request_redraw();
-            }
-            EventMsg::PlanUpdate(update) => {
-                // Commit plan updates directly to history (no status-line preview).
-                self.add_to_history(HistoryCell::new_plan_update(update));
-            }
-            EventMsg::ExecApprovalRequest(ev) => {
-                if self.is_write_cycle_active() {
-                    self.interrupts.push_exec_approval(id, ev);
-                } else {
-                    self.handle_exec_approval_now(id, ev);
-                }
-            }
-            EventMsg::ApplyPatchApprovalRequest(ev) => {
-                if self.is_write_cycle_active() {
-                    self.interrupts.push_apply_patch_approval(id, ev);
-                } else {
-                    self.handle_apply_patch_approval_now(id, ev);
-                }
-            }
-            EventMsg::ExecCommandBegin(ev) => {
-                if self.is_write_cycle_active() {
-                    self.interrupts.push_exec_begin(ev);
-                } else {
-                    self.handle_exec_begin_now(ev);
-                }
-            }
-            EventMsg::ExecCommandOutputDelta(_) => {
-                // TODO
-            }
-            EventMsg::PatchApplyBegin(PatchApplyBeginEvent {
-                call_id: _,
-                auto_approved,
-                changes,
-            }) => {
-                self.add_to_history(HistoryCell::new_patch_event(
-                    PatchEventType::ApplyBegin { auto_approved },
-                    changes,
-                ));
-            }
-            EventMsg::PatchApplyEnd(event) => {
-                if event.success {
-                    self.add_to_history(HistoryCell::new_patch_apply_success(event.stdout));
-                } else {
-                    self.add_to_history(HistoryCell::new_patch_apply_failure(event.stderr));
-                }
-            }
-            EventMsg::ExecCommandEnd(ExecCommandEndEvent {
-                call_id,
-                exit_code,
-                duration: _,
-                stdout,
-                stderr,
-            }) => {
-                // Compute summary before moving stdout into the history cell.
-                let cmd = self.running_commands.remove(&call_id);
-                self.active_history_cell = None;
-                self.add_to_history(HistoryCell::new_completed_exec_command(
-                    cmd.map(|cmd| cmd.command).unwrap_or_else(|| vec![call_id]),
-                    CommandOutput {
-                        exit_code,
-                        stdout,
-                        stderr,
-                    },
-                ));
-            }
-            EventMsg::McpToolCallBegin(ev) => {
-                if self.is_write_cycle_active() {
-                    self.interrupts.push_mcp_begin(ev);
-                } else {
-                    self.handle_mcp_begin_now(ev);
-                }
-            }
-            EventMsg::McpToolCallEnd(ev) => {
-                if self.is_write_cycle_active() {
-                    self.interrupts.push_mcp_end(ev);
-                } else {
-                    self.handle_mcp_end_now(ev);
-                }
-            }
-            EventMsg::GetHistoryEntryResponse(event) => {
-                let codex_core::protocol::GetHistoryEntryResponseEvent {
-                    offset,
-                    log_id,
-                    entry,
-                } = event;
-
-                // Inform bottom pane / composer.
-                self.bottom_pane
-                    .on_history_entry_response(log_id, offset, entry.map(|e| e.text));
-            }
-            EventMsg::ShutdownComplete => {
-                self.app_event_tx.send(AppEvent::ExitRequest);
-            }
-            EventMsg::TurnDiff(TurnDiffEvent { unified_diff }) => {
-                debug!("TurnDiffEvent: {unified_diff}");
-            }
+            EventMsg::AgentReasoningSectionBreak(_) => self.on_reasoning_section_break(),
+            EventMsg::TaskStarted => self.on_task_started(),
+            EventMsg::TaskComplete(TaskCompleteEvent { .. }) => self.on_task_complete(),
+            EventMsg::TokenCount(token_usage) => self.on_token_count(token_usage),
+            EventMsg::Error(ErrorEvent { message }) => self.on_error(message),
+            EventMsg::PlanUpdate(update) => self.on_plan_update(update),
+            EventMsg::ExecApprovalRequest(ev) => self.on_exec_approval_request(id, ev),
+            EventMsg::ApplyPatchApprovalRequest(ev) => self.on_apply_patch_approval_request(id, ev),
+            EventMsg::ExecCommandBegin(ev) => self.on_exec_command_begin(ev),
+            EventMsg::ExecCommandOutputDelta(delta) => self.on_exec_command_output_delta(delta),
+            EventMsg::PatchApplyBegin(ev) => self.on_patch_apply_begin(ev),
+            EventMsg::PatchApplyEnd(ev) => self.on_patch_apply_end(ev),
+            EventMsg::ExecCommandEnd(ev) => self.on_exec_command_end(ev),
+            EventMsg::McpToolCallBegin(ev) => self.on_mcp_tool_call_begin(ev),
+            EventMsg::McpToolCallEnd(ev) => self.on_mcp_tool_call_end(ev),
+            EventMsg::GetHistoryEntryResponse(ev) => self.on_get_history_entry_response(ev),
+            EventMsg::ShutdownComplete => self.on_shutdown_complete(),
+            EventMsg::TurnDiff(TurnDiffEvent { unified_diff }) => self.on_turn_diff(unified_diff),
             EventMsg::BackgroundEvent(BackgroundEventEvent { message }) => {
-                debug!("BackgroundEvent: {message}");
+                self.on_background_event(message)
             }
+        }
+        // Coalesce redraws: issue at most one after handling the event
+        if self.needs_redraw {
+            self.request_redraw();
+            self.needs_redraw = false;
         }
     }
 

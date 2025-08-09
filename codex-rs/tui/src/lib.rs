@@ -39,11 +39,11 @@ pub mod insert_history;
 pub mod live_wrap;
 mod log_layer;
 mod markdown;
-mod markdown_utils;
 mod markdown_stream;
-mod line_utils;
 mod render;
 mod streaming;
+#[cfg(test)]
+mod test_utils;
 pub mod onboarding;
 mod session_log;
 mod shimmer;

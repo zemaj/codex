@@ -32,7 +32,7 @@ use std::thread;
 use std::time::Duration;
 
 /// Time window for debouncing redraw requests.
-const REDRAW_DEBOUNCE: Duration = Duration::from_millis(10);
+const REDRAW_DEBOUNCE: Duration = Duration::from_millis(1);
 
 /// Top-level application state: which full-screen view is currently active.
 #[allow(clippy::large_enum_variant)]

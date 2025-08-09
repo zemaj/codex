@@ -4,7 +4,7 @@ use codex_core::config::Config;
 use ratatui::text::Line;
 
 use crate::markdown;
-use crate::markdown_utils::{is_inside_unclosed_fence, strip_empty_fenced_code_blocks};
+use crate::render::markdown_utils::{is_inside_unclosed_fence, strip_empty_fenced_code_blocks};
 
 /// Newline-gated accumulator that renders markdown and commits only fully
 /// completed logical lines.
@@ -73,7 +73,7 @@ impl MarkdownStreamCollector {
 
         let mut complete_line_count = rendered.len();
         if complete_line_count > 0
-            && crate::line_utils::is_blank_line_spaces_only(&rendered[complete_line_count - 1])
+            && crate::render::line_utils::is_blank_line_spaces_only(&rendered[complete_line_count - 1])
         {
             complete_line_count -= 1;
         }

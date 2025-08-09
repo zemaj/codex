@@ -70,12 +70,8 @@ impl StreamController {
         // leave header state unchanged; caller decides when to reset
     }
 
-    fn idx(kind: StreamKind) -> usize {
-        match kind {
-            StreamKind::Answer => 0,
-            StreamKind::Reasoning => 1,
-        }
-    }
+    #[inline]
+    fn idx(kind: StreamKind) -> usize { kind as usize }
     fn state(&self, kind: StreamKind) -> &StreamState {
         &self.states[Self::idx(kind)]
     }
@@ -89,6 +85,17 @@ impl StreamController {
         out_lines: &mut Lines,
     ) -> bool {
         self.header.maybe_emit(kind, out_lines)
+    }
+
+    #[inline]
+    fn ensure_single_trailing_blank(lines: &mut Lines) {
+        if lines
+            .last()
+            .map(|l| !crate::render::line_utils::is_blank_line_trim(l))
+            .unwrap_or(true)
+        {
+            lines.push(Line::from(""));
+        }
     }
 
     /// Begin a stream, flushing previously completed lines from any other
@@ -108,14 +115,8 @@ impl StreamController {
                     let mut lines: Lines = Vec::new();
                     self.emit_header_if_needed(current, &mut lines);
                     lines.extend(step.history);
-                    // Ensure at most one blank separator after the flushed block.
-                    if let Some(last) = lines.last() {
-                        if !crate::line_utils::is_blank_line_trim(last) {
-                            lines.push(Line::from(""));
-                        }
-                    } else {
-                        lines.push(Line::from(""));
-                    }
+                    // Ensure at most one trailing blank after the flushed block.
+                    Self::ensure_single_trailing_blank(&mut lines);
                     sink.insert_history(lines);
                 }
                 self.current_stream = None;
@@ -195,13 +196,7 @@ impl StreamController {
                 let step = state.drain_all();
                 lines.extend(step.history);
             }
-            if lines
-                .last()
-                .map(|l| !crate::line_utils::is_blank_line_trim(l))
-                .unwrap_or(true)
-            {
-                lines.push(Line::from(""));
-            }
+            Self::ensure_single_trailing_blank(&mut lines);
             sink.insert_history(lines);
 
             // Cleanup

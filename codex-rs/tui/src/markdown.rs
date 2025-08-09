@@ -34,7 +34,7 @@ fn append_markdown_with_opener_and_cwd(
             Segment::Text(s) => {
                 let processed = rewrite_file_citations(&s, file_opener, cwd);
                 let rendered = tui_markdown::from_str(&processed);
-                crate::line_utils::push_owned_lines(&rendered.lines, lines);
+                crate::render::line_utils::push_owned_lines(&rendered.lines, lines);
             }
             Segment::Code { content, .. } => {
                 // Emit the code content exactly as-is, line by line.

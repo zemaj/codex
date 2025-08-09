@@ -27,26 +27,7 @@ fn normalize_text(s: &str) -> String {
         .replace('\u{201D}', "\"") // right double quote
 }
 
-// --- Local test utils for flattening ratatui lines ---
-fn line_to_plain_string(line: &ratatui::text::Line<'_>) -> String {
-    line
-        .spans
-        .iter()
-        .map(|sp| sp.content.clone())
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-fn lines_to_plain_strings(lines: &[ratatui::text::Line<'_>]) -> Vec<String> {
-    lines.iter().map(line_to_plain_string).collect()
-}
-
-fn append_lines_to_transcript(lines: &[ratatui::text::Line<'_>], out: &mut String) {
-    for s in lines_to_plain_strings(lines) {
-        out.push_str(&s);
-        out.push('\n');
-    }
-}
+// Common test helpers are provided by `crate::test_utils`.
 
 fn open_fixture(name: &str) -> std::fs::File {
     // 1) Prefer fixtures within this crate
@@ -139,7 +120,7 @@ async fn vt100_replay_hello_conversation_from_log() {
                     let ev: CodexEvent =
                         serde_json::from_value(payload.clone()).expect("parse codex event");
                     widget.handle_codex_event(ev);
-                    drain_and_render_history(&mut terminal, &rx, &mut ansi);
+                    crate::test_utils::drain_insert_history(&mut terminal, &rx, &mut ansi);
                 }
             }
             "app_event" => {
@@ -147,7 +128,7 @@ async fn vt100_replay_hello_conversation_from_log() {
                     match variant {
                         "CommitTick" => {
                             widget.on_commit_tick();
-                            drain_and_render_history(&mut terminal, &rx, &mut ansi);
+                            crate::test_utils::drain_insert_history(&mut terminal, &rx, &mut ansi);
                         }
                         _ => { /* ignored in this replay */ }
                     }
@@ -293,10 +274,10 @@ async fn vt100_replay_markdown_session_from_log() {
                         match app_ev {
                             AppEvent::InsertHistory(lines) => {
                                 if let Some(idx) = current_turn_index {
-                                    let texts = lines_to_plain_strings(&lines);
+                                    let texts = crate::test_utils::lines_to_plain_strings(&lines);
                                     let turn_count = texts.iter().filter(|s| s.as_str() == "codex").count();
                                     codex_headers_per_turn[idx] += turn_count;
-                                    append_lines_to_transcript(&lines, &mut transcript_per_turn[idx]);
+                                    crate::test_utils::append_lines_to_transcript(&lines, &mut transcript_per_turn[idx]);
                                 }
                                 crate::insert_history::insert_history_lines_to_writer(
                                     &mut terminal,
@@ -318,10 +299,10 @@ async fn vt100_replay_markdown_session_from_log() {
                                 match app_ev {
                                     AppEvent::InsertHistory(lines) => {
                                         if let Some(idx) = current_turn_index {
-                                            let texts = lines_to_plain_strings(&lines);
+                                            let texts = crate::test_utils::lines_to_plain_strings(&lines);
                                             let turn_count = texts.iter().filter(|s| s.as_str() == "codex").count();
                                             codex_headers_per_turn[idx] += turn_count;
-                                            append_lines_to_transcript(&lines, &mut transcript_per_turn[idx]);
+                                            crate::test_utils::append_lines_to_transcript(&lines, &mut transcript_per_turn[idx]);
                                         }
                                         crate::insert_history::insert_history_lines_to_writer(
                                             &mut terminal,
@@ -466,7 +447,7 @@ async fn vt100_replay_longer_markdown_session_from_log() {
                         match app_ev {
                             AppEvent::InsertHistory(lines) => {
                                 if let Some(idx) = current_turn_index {
-                                    let texts = lines_to_plain_strings(&lines);
+                                    let texts = crate::test_utils::lines_to_plain_strings(&lines);
                                     let mut turn_count = 0usize;
                                     for (i, s) in texts.iter().enumerate() {
                                         if s == "codex" {
@@ -504,7 +485,7 @@ async fn vt100_replay_longer_markdown_session_from_log() {
                                 match app_ev {
                                     AppEvent::InsertHistory(lines) => {
                                         if let Some(idx) = current_turn_index {
-                                            let texts = lines_to_plain_strings(&lines);
+                        let texts = crate::test_utils::lines_to_plain_strings(&lines);
                                             let mut turn_count = 0usize;
                                             for (i, s) in texts.iter().enumerate() {
                                                 if s == "codex" {
@@ -574,22 +555,7 @@ async fn vt100_replay_longer_markdown_session_from_log() {
     // batching to prevent the cut-off at the start.
 }
 
-fn drain_and_render_history(
-    term: &mut crate::custom_terminal::Terminal<TestBackend>,
-    rx: &Receiver<AppEvent>,
-    out: &mut Vec<u8>,
-) {
-    while let Ok(ev) = rx.try_recv() {
-        match ev {
-            AppEvent::InsertHistory(lines) => {
-                crate::insert_history::insert_history_lines_to_writer(term, out, lines);
-            }
-            // We ignore redraw and animation control here; the vt100 bytes we
-            // assert on are solely from history insertions.
-            _ => {}
-        }
-    }
-}
+// drain helper moved to `crate::test_utils::drain_insert_history`
 
 // Replay a longer hello session and ensure every turn's full answer is present
 // in the transcript by extracting expected answers from AgentMessage/TaskComplete
@@ -672,7 +638,7 @@ async fn vt100_replay_longer_hello_session_from_log() {
                         match app_ev {
                             AppEvent::InsertHistory(lines) => {
                                 if let Some(idx) = current_turn_index {
-                                    append_lines_to_transcript(&lines, &mut transcript_per_turn[idx]);
+                                    crate::test_utils::append_lines_to_transcript(&lines, &mut transcript_per_turn[idx]);
                                 }
                                 crate::insert_history::insert_history_lines_to_writer(
                                     &mut terminal,
@@ -693,7 +659,7 @@ async fn vt100_replay_longer_hello_session_from_log() {
                             match app_ev {
                                 AppEvent::InsertHistory(lines) => {
                                     if let Some(idx) = current_turn_index {
-                                        append_lines_to_transcript(&lines, &mut transcript_per_turn[idx]);
+                                            crate::test_utils::append_lines_to_transcript(&lines, &mut transcript_per_turn[idx]);
                                     }
                                     crate::insert_history::insert_history_lines_to_writer(
                                         &mut terminal,

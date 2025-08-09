@@ -54,20 +54,7 @@ pub(crate) enum PatchEventType {
     ApplyBegin { auto_approved: bool },
 }
 
-fn span_to_static(span: &Span) -> Span<'static> {
-    Span {
-        style: span.style,
-        content: std::borrow::Cow::Owned(span.content.clone().into_owned()),
-    }
-}
-
-fn line_to_static(line: &Line) -> Line<'static> {
-    Line {
-        style: line.style,
-        alignment: line.alignment,
-        spans: line.spans.iter().map(span_to_static).collect(),
-    }
-}
+// Duplicate of helpers in `crate::line_utils`; use the shared versions instead.
 
 /// Represents an event to display in the conversation history. Returns its
 /// `Vec<Line<'static>>` representation to make it easier to display in a
@@ -177,7 +164,11 @@ impl HistoryCell {
             | HistoryCell::PatchApplyResult { view }
             | HistoryCell::ActiveExecCommand { view, .. }
             | HistoryCell::ActiveMcpToolCall { view, .. } => {
-                view.lines.iter().map(line_to_static).collect()
+                view
+                    .lines
+                    .iter()
+                    .map(crate::render::line_utils::line_to_static)
+                    .collect()
             }
             HistoryCell::CompletedMcpToolCallWithImageOutput { .. } => vec![
                 Line::from("tool result (image output omitted)"),
