@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tracing_test::traced_test;
 
 use codex_app_server_protocol::AuthMode;
+use codex_core::ApiDebugLogger;
 use codex_core::ContentItem;
 use codex_core::ModelClient;
 use codex_core::ModelProviderInfo;
@@ -94,6 +95,7 @@ async fn run_stream_with_bytes(sse_body: &[u8]) -> Vec<ResponseEvent> {
         effort,
         summary,
         conversation_id,
+        ApiDebugLogger::disabled(),
     );
 
     let mut prompt = Prompt::default();

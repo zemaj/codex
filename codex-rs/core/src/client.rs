@@ -39,6 +39,8 @@ use crate::client_common::ResponsesApiRequest;
 use crate::client_common::create_reasoning_param_for_request;
 use crate::client_common::create_text_param_for_request;
 use crate::config::Config;
+use crate::debug_logger::ApiDebugLogger;
+use crate::debug_logger::RequestLogHandle;
 use crate::default_client::create_client;
 use crate::error::CodexErr;
 use crate::error::ConnectionFailedError;
@@ -86,6 +88,7 @@ pub struct ModelClient {
     conversation_id: ConversationId,
     effort: Option<ReasoningEffortConfig>,
     summary: ReasoningSummaryConfig,
+    api_debug_logger: ApiDebugLogger,
 }
 
 impl ModelClient {
@@ -97,6 +100,7 @@ impl ModelClient {
         effort: Option<ReasoningEffortConfig>,
         summary: ReasoningSummaryConfig,
         conversation_id: ConversationId,
+        api_debug_logger: ApiDebugLogger,
     ) -> Self {
         let client = create_client();
 
@@ -109,6 +113,7 @@ impl ModelClient {
             conversation_id,
             effort,
             summary,
+            api_debug_logger,
         }
     }
 
@@ -148,6 +153,7 @@ impl ModelClient {
                     &self.client,
                     &self.provider,
                     &self.otel_event_manager,
+                    &self.api_debug_logger,
                 )
                 .await?;
 
@@ -293,6 +299,12 @@ impl ModelClient {
         auth_manager: &Option<Arc<AuthManager>>,
         task_kind: TaskKind,
     ) -> std::result::Result<ResponseStream, StreamAttemptError> {
+        let log_handle = self.api_debug_logger.start_request(
+            "POST",
+            &self.provider.get_full_url(&None),
+            payload_json,
+            Some(self.conversation_id.to_string()),
+        );
         // Always fetch the latest auth in case a prior attempt refreshed the token.
         let auth = auth_manager.as_ref().and_then(|m| m.auth());
 
@@ -346,6 +358,7 @@ impl ModelClient {
 
         match res {
             Ok(resp) if resp.status().is_success() => {
+                log_handle.log_response_headers(resp.status().as_u16(), resp.headers());
                 let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
 
                 if let Some(snapshot) = parse_rate_limit_snapshot(resp.headers())
@@ -364,25 +377,31 @@ impl ModelClient {
                         request_id: request_id.clone(),
                     })
                 });
+                let log_handle = log_handle.clone();
                 tokio::spawn(process_sse(
                     stream,
                     tx_event,
                     self.provider.stream_idle_timeout(),
                     self.otel_event_manager.clone(),
+                    log_handle,
                 ));
 
                 Ok(ResponseStream { rx_event })
             }
             Ok(res) => {
                 let status = res.status();
+                let headers = res.headers().clone();
+                log_handle.log_response_headers(status.as_u16(), &headers);
 
                 // Pull out Retry‑After header if present.
-                let retry_after_secs = res
-                    .headers()
+                let retry_after_secs = headers
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.parse::<u64>().ok());
                 let retry_after = retry_after_secs.map(|s| Duration::from_millis(s * 1_000));
+
+                let body = res.text().await.unwrap_or_default();
+                log_handle.log_text_body("error", Some(status.as_u16()), &body);
 
                 if status == StatusCode::UNAUTHORIZED
                     && let Some(manager) = auth_manager.as_ref()
@@ -403,7 +422,6 @@ impl ModelClient {
                     || status.is_server_error())
                 {
                     // Surface the error body to callers. Use `unwrap_or_default` per Clippy.
-                    let body = res.text().await.unwrap_or_default();
                     return Err(StreamAttemptError::Fatal(CodexErr::UnexpectedStatus(
                         UnexpectedResponseError {
                             status,
@@ -414,9 +432,9 @@ impl ModelClient {
                 }
 
                 if status == StatusCode::TOO_MANY_REQUESTS {
-                    let rate_limit_snapshot = parse_rate_limit_snapshot(res.headers());
-                    let body = res.json::<ErrorResponse>().await.ok();
-                    if let Some(ErrorResponse { error }) = body {
+                    let rate_limit_snapshot = parse_rate_limit_snapshot(&headers);
+                    let parsed_error = serde_json::from_str::<ErrorResponse>(&body).ok();
+                    if let Some(ErrorResponse { error }) = parsed_error {
                         if error.r#type.as_deref() == Some("usage_limit_reached") {
                             // Prefer the plan_type provided in the error message if present
                             // because it's more up to date than the one encoded in the auth
@@ -669,6 +687,7 @@ async fn process_sse<S>(
     tx_event: mpsc::Sender<Result<ResponseEvent>>,
     idle_timeout: Duration,
     otel_event_manager: OtelEventManager,
+    log_handle: RequestLogHandle,
 ) where
     S: Stream<Item = Result<Bytes>> + Unpin,
 {
@@ -690,6 +709,9 @@ async fn process_sse<S>(
             Ok(Some(Err(e))) => {
                 debug!("SSE Error: {e:#}");
                 let event = CodexErr::Stream(e.to_string(), None);
+                if log_handle.enabled() {
+                    log_handle.log_error(&format!("stream error: {e}"));
+                }
                 let _ = tx_event.send(Err(event)).await;
                 return;
             }
@@ -727,12 +749,19 @@ async fn process_sse<S>(
                         ));
                         otel_event_manager.see_event_completed_failed(&error);
 
+                        if log_handle.enabled() {
+                            log_handle.log_error(&format!("{error}"));
+                        }
+
                         let _ = tx_event.send(Err(error)).await;
                     }
                 }
                 return;
             }
             Err(_) => {
+                if log_handle.enabled() {
+                    log_handle.log_error("idle timeout waiting for SSE");
+                }
                 let _ = tx_event
                     .send(Err(CodexErr::Stream(
                         "idle timeout waiting for SSE".into(),
@@ -745,6 +774,9 @@ async fn process_sse<S>(
 
         let raw = sse.data.clone();
         trace!("SSE event: {}", raw);
+        if log_handle.enabled() {
+            log_handle.log_sse_event(&sse.event, &raw);
+        }
 
         let event: SseEvent = match serde_json::from_str(&sse.data) {
             Ok(event) => event,
@@ -920,6 +952,7 @@ async fn stream_from_fixture(
         tx_event,
         provider.stream_idle_timeout(),
         otel_event_manager,
+        RequestLogHandle::disabled(),
     ));
     Ok(ResponseStream { rx_event })
 }
@@ -995,6 +1028,7 @@ mod tests {
             tx,
             provider.stream_idle_timeout(),
             otel_event_manager,
+            RequestLogHandle::disabled(),
         ));
 
         let mut events = Vec::new();
@@ -1031,6 +1065,7 @@ mod tests {
             tx,
             provider.stream_idle_timeout(),
             otel_event_manager,
+            RequestLogHandle::disabled(),
         ));
 
         let mut out = Vec::new();

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use codex_app_server_protocol::AuthMode;
+use codex_core::ApiDebugLogger;
 use codex_core::ContentItem;
 use codex_core::ModelClient;
 use codex_core::ModelProviderInfo;
@@ -78,6 +79,7 @@ async fn responses_stream_includes_task_type_header() {
         effort,
         summary,
         conversation_id,
+        ApiDebugLogger::disabled(),
     );
 
     let mut prompt = Prompt::default();

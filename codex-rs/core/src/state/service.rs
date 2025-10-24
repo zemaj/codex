@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::AuthManager;
 use crate::RolloutRecorder;
+use crate::debug_logger::ApiDebugLogger;
 use crate::mcp_connection_manager::McpConnectionManager;
 use crate::tools::sandboxing::ApprovalStore;
 use crate::unified_exec::UnifiedExecSessionManager;
@@ -18,5 +19,6 @@ pub(crate) struct SessionServices {
     pub(crate) show_raw_agent_reasoning: bool,
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) otel_event_manager: OtelEventManager,
+    pub(crate) api_debug_logger: ApiDebugLogger,
     pub(crate) tool_approvals: Mutex<ApprovalStore>,
 }

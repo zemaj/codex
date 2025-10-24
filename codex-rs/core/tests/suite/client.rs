@@ -1,4 +1,5 @@
 use codex_app_server_protocol::AuthMode;
+use codex_core::ApiDebugLogger;
 use codex_core::CodexAuth;
 use codex_core::ContentItem;
 use codex_core::ConversationManager;
@@ -672,6 +673,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         effort,
         summary,
         conversation_id,
+        ApiDebugLogger::disabled(),
     );
 
     let mut prompt = Prompt::default();

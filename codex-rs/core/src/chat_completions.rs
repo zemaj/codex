@@ -4,6 +4,8 @@ use crate::ModelProviderInfo;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
+use crate::debug_logger::ApiDebugLogger;
+use crate::debug_logger::RequestLogHandle;
 use crate::error::CodexErr;
 use crate::error::ConnectionFailedError;
 use crate::error::ResponseStreamFailed;
@@ -39,6 +41,7 @@ pub(crate) async fn stream_chat_completions(
     client: &reqwest::Client,
     provider: &ModelProviderInfo,
     otel_event_manager: &OtelEventManager,
+    api_debug_logger: &ApiDebugLogger,
 ) -> Result<ResponseStream> {
     if prompt.output_schema.is_some() {
         return Err(CodexErr::UnsupportedOperation(
@@ -286,6 +289,9 @@ pub(crate) async fn stream_chat_completions(
         "tools": tools_json,
     });
 
+    let log_handle =
+        api_debug_logger.start_request("POST", &provider.get_full_url(&None), &payload, None);
+
     debug!(
         "POST to {}: {}",
         provider.get_full_url(&None),
@@ -310,7 +316,9 @@ pub(crate) async fn stream_chat_completions(
 
         match res {
             Ok(resp) if resp.status().is_success() => {
+                log_handle.log_response_headers(resp.status().as_u16(), resp.headers());
                 let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
+                let log_handle = log_handle.clone();
                 let stream = resp.bytes_stream().map_err(|e| {
                     CodexErr::ResponseStreamFailed(ResponseStreamFailed {
                         source: e,
@@ -322,13 +330,20 @@ pub(crate) async fn stream_chat_completions(
                     tx_event,
                     provider.stream_idle_timeout(),
                     otel_event_manager.clone(),
+                    log_handle,
                 ));
                 return Ok(ResponseStream { rx_event });
             }
             Ok(res) => {
                 let status = res.status();
+                let retry_after_secs = res
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok());
+                let body = res.text().await.unwrap_or_default();
+                log_handle.log_text_body("error", Some(status.as_u16()), &body);
                 if !(status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()) {
-                    let body = (res.text().await).unwrap_or_default();
                     return Err(CodexErr::UnexpectedStatus(UnexpectedResponseError {
                         status,
                         body,
@@ -343,24 +358,21 @@ pub(crate) async fn stream_chat_completions(
                     }));
                 }
 
-                let retry_after_secs = res
-                    .headers()
-                    .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok());
-
                 let delay = retry_after_secs
                     .map(|s| Duration::from_millis(s * 1_000))
                     .unwrap_or_else(|| backoff(attempt));
+                log_handle.log_retry(attempt, delay.as_millis() as u64);
                 tokio::time::sleep(delay).await;
             }
             Err(e) => {
+                log_handle.log_error(&format!("transport error: {e}"));
                 if attempt > max_retries {
                     return Err(CodexErr::ConnectionFailed(ConnectionFailedError {
                         source: e,
                     }));
                 }
                 let delay = backoff(attempt);
+                log_handle.log_retry(attempt, delay.as_millis() as u64);
                 tokio::time::sleep(delay).await;
             }
         }
@@ -375,6 +387,7 @@ async fn process_chat_sse<S>(
     tx_event: mpsc::Sender<Result<ResponseEvent>>,
     idle_timeout: Duration,
     otel_event_manager: OtelEventManager,
+    log_handle: RequestLogHandle,
 ) where
     S: Stream<Item = Result<Bytes>> + Unpin,
 {
@@ -409,6 +422,7 @@ async fn process_chat_sse<S>(
                 let _ = tx_event
                     .send(Err(CodexErr::Stream(e.to_string(), None)))
                     .await;
+                log_handle.log_error(&format!("sse error: {e}"));
                 return;
             }
             Ok(None) => {
@@ -419,6 +433,7 @@ async fn process_chat_sse<S>(
                         token_usage: None,
                     }))
                     .await;
+                log_handle.log_text_body("completed", None, "stream closed");
                 return;
             }
             Err(_) => {
@@ -428,6 +443,7 @@ async fn process_chat_sse<S>(
                         None,
                     )))
                     .await;
+                log_handle.log_error("idle timeout waiting for SSE");
                 return;
             }
         };
@@ -465,6 +481,7 @@ async fn process_chat_sse<S>(
                     token_usage: None,
                 }))
                 .await;
+            log_handle.log_text_body("completed", None, "[DONE]");
             return;
         }
 
@@ -474,6 +491,7 @@ async fn process_chat_sse<S>(
             Err(_) => continue,
         };
         trace!("chat_completions received SSE chunk: {chunk:?}");
+        log_handle.log_sse_event(sse.event.as_str(), &sse.data);
 
         let choice_opt = chunk.get("choices").and_then(|c| c.get(0));
 

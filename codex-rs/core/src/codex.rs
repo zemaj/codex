@@ -59,6 +59,7 @@ use crate::config::Config;
 use crate::config_types::McpServerTransportConfig;
 use crate::config_types::ShellEnvironmentPolicy;
 use crate::conversation_history::ConversationHistory;
+use crate::debug_logger::ApiDebugLogger;
 use crate::environment_context::EnvironmentContext;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
@@ -359,6 +360,7 @@ impl Session {
         session_configuration: &SessionConfiguration,
         conversation_id: ConversationId,
         sub_id: String,
+        api_debug_logger: ApiDebugLogger,
     ) -> TurnContext {
         let config = session_configuration.original_config_do_not_use.clone();
         let model_family = find_family_for_model(&session_configuration.model)
@@ -385,6 +387,7 @@ impl Session {
             session_configuration.model_reasoning_effort,
             session_configuration.model_reasoning_summary,
             conversation_id,
+            api_debug_logger,
         );
 
         let tools_config = ToolsConfig::new(&ToolsConfigParams {
@@ -553,6 +556,7 @@ impl Session {
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
             auth_manager: Arc::clone(&auth_manager),
             otel_event_manager,
+            api_debug_logger: ApiDebugLogger::new(&config.codex_home),
             tool_approvals: Mutex::new(ApprovalStore::default()),
         };
 
@@ -658,6 +662,7 @@ impl Session {
             &session_configuration,
             self.conversation_id,
             sub_id,
+            self.services.api_debug_logger.clone(),
         );
         if let Some(final_schema) = updates.final_output_json_schema {
             turn_context.final_output_json_schema = final_schema;
@@ -1456,6 +1461,7 @@ async fn spawn_review_thread(
         per_turn_config.model_reasoning_effort,
         per_turn_config.model_reasoning_summary,
         sess.conversation_id,
+        sess.services.api_debug_logger.clone(),
     );
 
     let review_turn_context = TurnContext {
@@ -2544,6 +2550,7 @@ mod tests {
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
             auth_manager: Arc::clone(&auth_manager),
             otel_event_manager: otel_event_manager.clone(),
+            api_debug_logger: ApiDebugLogger::new(&config.codex_home),
             tool_approvals: Mutex::new(ApprovalStore::default()),
         };
 
@@ -2554,6 +2561,7 @@ mod tests {
             &session_configuration,
             conversation_id,
             "turn_id".to_string(),
+            ApiDebugLogger::disabled(),
         );
 
         let session = Session {
@@ -2612,6 +2620,7 @@ mod tests {
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
             auth_manager: Arc::clone(&auth_manager),
             otel_event_manager: otel_event_manager.clone(),
+            api_debug_logger: ApiDebugLogger::disabled(),
             tool_approvals: Mutex::new(ApprovalStore::default()),
         };
 
@@ -2622,6 +2631,7 @@ mod tests {
             &session_configuration,
             conversation_id,
             "turn_id".to_string(),
+            ApiDebugLogger::disabled(),
         ));
 
         let session = Arc::new(Session {
