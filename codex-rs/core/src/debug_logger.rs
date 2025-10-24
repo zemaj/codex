@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use chrono::Utc;
 use reqwest::header::HeaderMap;
@@ -71,6 +72,8 @@ impl ApiDebugLogger {
             .directory
             .join(format!("{base_name}_response.jsonl"));
 
+        let usage_path = self.inner.directory.join(format!("{base_name}_usage.json"));
+
         let entry = serde_json::json!({
             "timestamp": timestamp.to_rfc3339(),
             "request_id": request_id,
@@ -91,6 +94,8 @@ impl ApiDebugLogger {
                 response_path,
                 request_id,
                 session_id,
+                usage_path,
+                usage_entries: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -107,6 +112,8 @@ struct RequestLogInner {
     response_path: PathBuf,
     request_id: String,
     session_id: Option<String>,
+    usage_path: PathBuf,
+    usage_entries: Mutex<Vec<Value>>,
 }
 
 impl RequestLogHandle {
@@ -145,15 +152,20 @@ impl RequestLogHandle {
     pub fn log_sse_event(&self, event: &str, data: &str) {
         let parsed_data =
             serde_json::from_str::<Value>(data).unwrap_or_else(|_| Value::String(data.to_string()));
+        let entry_data = parsed_data.clone();
         let entry = serde_json::json!({
             "timestamp": Utc::now().to_rfc3339(),
             "type": "sse_event",
             "request_id": self.request_id(),
             "session_id": self.inner.session_id,
             "event": event,
-            "data": parsed_data,
+            "data": entry_data,
         });
         self.append(&entry);
+
+        if let Some(usage) = extract_usage(&parsed_data) {
+            self.append_usage(&usage);
+        }
     }
 
     pub fn log_retry(&self, attempt: u64, wait_ms: u64) {
@@ -194,6 +206,50 @@ impl RequestLogHandle {
                 self.inner.response_path, err
             );
         }
+    }
+
+    fn append_usage(&self, usage: &Value) {
+        if !self.inner.enabled {
+            return;
+        }
+
+        if let Err(err) = self.inner.append_usage(usage) {
+            warn!(
+                "failed to update usage log {:?}: {}",
+                self.inner.usage_path, err
+            );
+        }
+    }
+}
+
+impl RequestLogInner {
+    fn append_usage(&self, usage: &Value) -> std::io::Result<()> {
+        let entries = {
+            let mut guard = self.usage_entries.lock().unwrap();
+            guard.push(usage.clone());
+            guard.clone()
+        };
+
+        write_pretty_json(&self.usage_path, &Value::Array(entries))
+    }
+}
+
+fn extract_usage(value: &Value) -> Option<Value> {
+    match value {
+        Value::Object(map) => {
+            if let Some(usage) = map.get("usage") {
+                if !usage.is_null() {
+                    return Some(usage.clone());
+                }
+            }
+
+            if let Some(response) = map.get("response") {
+                return extract_usage(response);
+            }
+
+            None
+        }
+        _ => None,
     }
 }
 
