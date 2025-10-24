@@ -299,20 +299,18 @@ impl ModelClient {
         auth_manager: &Option<Arc<AuthManager>>,
         task_kind: TaskKind,
     ) -> std::result::Result<ResponseStream, StreamAttemptError> {
+        // Always fetch the latest auth in case a prior attempt refreshed the token.
+        let auth = auth_manager.as_ref().and_then(|m| m.auth());
+        let url = self.provider.get_full_url(&auth);
+
         let log_handle = self.api_debug_logger.start_request(
             "POST",
-            &self.provider.get_full_url(&None),
+            &url,
             payload_json,
             Some(self.conversation_id.to_string()),
         );
-        // Always fetch the latest auth in case a prior attempt refreshed the token.
-        let auth = auth_manager.as_ref().and_then(|m| m.auth());
 
-        trace!(
-            "POST to {}: {:?}",
-            self.provider.get_full_url(&auth),
-            serde_json::to_string(payload_json)
-        );
+        trace!("POST to {}: {:?}", url, serde_json::to_string(payload_json));
 
         let mut req_builder = self
             .provider
