@@ -39,9 +39,8 @@ use crate::client_common::ResponsesApiRequest;
 use crate::client_common::create_reasoning_param_for_request;
 use crate::client_common::create_text_param_for_request;
 use crate::config::Config;
-use crate::debug_logger::ApiDebugLogger;
-use crate::debug_logger::RequestLogHandle;
-use crate::default_client::create_client;
+use crate::debug_logger::{ApiDebugLogger, RequestLogHandle};
+use crate::default_client::{create_client, CodexHttpClient};
 use crate::error::CodexErr;
 use crate::error::ConnectionFailedError;
 use crate::error::ResponseStreamFailed;
@@ -83,7 +82,7 @@ pub struct ModelClient {
     config: Arc<Config>,
     auth_manager: Option<Arc<AuthManager>>,
     otel_event_manager: OtelEventManager,
-    client: reqwest::Client,
+    client: CodexHttpClient,
     provider: ModelProviderInfo,
     conversation_id: ConversationId,
     effort: Option<ReasoningEffortConfig>,
@@ -136,6 +135,14 @@ impl ModelClient {
     /// specialised helpers are private to avoid accidental misuse.
     pub async fn stream(&self, prompt: &Prompt) -> Result<ResponseStream> {
         self.stream_with_task_kind(prompt, TaskKind::Regular).await
+    }
+
+    pub fn config(&self) -> Arc<Config> {
+        Arc::clone(&self.config)
+    }
+
+    pub fn provider(&self) -> &ModelProviderInfo {
+        &self.provider
     }
 
     pub(crate) async fn stream_with_task_kind(
@@ -310,7 +317,12 @@ impl ModelClient {
             Some(self.conversation_id.to_string()),
         );
 
-        trace!("POST to {}: {:?}", url, serde_json::to_string(payload_json));
+        trace!(
+            "POST to {}: {:?}",
+            url,
+            serde_json::to_string(payload_json)
+                .unwrap_or("<unable to serialize payload>".to_string())
+        );
 
         let mut req_builder = self
             .provider
@@ -345,13 +357,6 @@ impl ModelClient {
                 .headers()
                 .get("cf-ray")
                 .map(|v| v.to_str().unwrap_or_default().to_string());
-
-            debug!(
-                "Response status: {}, cf-ray: {:?}, version: {:?}",
-                resp.status(),
-                request_id,
-                resp.version()
-            );
         }
 
         match res {
