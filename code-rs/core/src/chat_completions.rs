@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::debug;
 use tracing::trace;
+use tracing::warn;
 
 use crate::auth::AuthManager;
 use crate::ModelProviderInfo;
@@ -36,6 +37,84 @@ use code_app_server_protocol::AuthMode;
 use code_protocol::models::ContentItem;
 use code_protocol::models::ReasoningItemContent;
 use code_protocol::models::ResponseItem;
+
+/// Sanitizes streamed tool-call arguments by stripping markdown fences and extracting
+/// the first valid JSON object or array if possible. Falls back to the trimmed input
+/// when no valid JSON can be located.
+pub fn sanitize_tool_call_arguments(raw: &str) -> String {
+    let trimmed = raw.trim();
+
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        return trimmed.to_string();
+    }
+
+    let without_fences = if let Some(start) = trimmed.find("```") {
+        let after_start = &trimmed[start + 3..];
+        let content_start = if let Some(newline_pos) = after_start.find('\n') {
+            start + 3 + newline_pos + 1
+        } else {
+            start + 3
+        };
+
+        if let Some(end) = trimmed[content_start..].find("```") {
+            &trimmed[content_start..content_start + end]
+        } else {
+            &trimmed[content_start..]
+        }
+    } else {
+        trimmed
+    };
+
+    let cleaned = without_fences.trim();
+
+    for (idx, ch) in cleaned.char_indices() {
+        if ch == '{' || ch == '[' {
+            let candidate = &cleaned[idx..];
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(candidate) {
+                if let Ok(serialized) = serde_json::to_string(&parsed) {
+                    return serialized;
+                }
+            }
+
+            let closing = if ch == '{' { '}' } else { ']' };
+            let mut depth = 0;
+            let mut in_string = false;
+            let mut escape_next = false;
+
+            for (end_idx, end_ch) in cleaned[idx..].char_indices() {
+                if escape_next {
+                    escape_next = false;
+                    continue;
+                }
+
+                match end_ch {
+                    '\\' if in_string => escape_next = true,
+                    '"' => in_string = !in_string,
+                    c if c == ch && !in_string => depth += 1,
+                    c if c == closing && !in_string => {
+                        depth -= 1;
+                        if depth == 0 {
+                            let candidate = &cleaned[idx..idx + end_idx + 1];
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(candidate) {
+                                if let Ok(serialized) = serde_json::to_string(&parsed) {
+                                    return serialized;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    cleaned.to_string()
+}
 
 /// Implementation for the classic Chat Completions API.
 pub(crate) async fn stream_chat_completions(
@@ -790,11 +869,22 @@ async fn process_chat_sse<S>(
                             let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone { item, sequence_number: None, output_index: None })).await;
                         }
 
+                        let raw_arguments = fn_call_state.arguments.clone();
+                        let sanitized_arguments = sanitize_tool_call_arguments(&raw_arguments);
+                        if sanitized_arguments != raw_arguments {
+                            warn!(
+                                "Sanitized tool-call arguments for function '{}'. original_len={} sanitized_len={}",
+                                fn_call_state.name.as_deref().unwrap_or(""),
+                                raw_arguments.len(),
+                                sanitized_arguments.len()
+                            );
+                        }
+
                         // Then emit the FunctionCall response item.
                         let item = ResponseItem::FunctionCall {
                             id: current_item_id.clone(),
                             name: fn_call_state.name.clone().unwrap_or_else(|| "".to_string()),
-                            arguments: fn_call_state.arguments.clone(),
+                            arguments: sanitized_arguments,
                             call_id: fn_call_state.call_id.clone().unwrap_or_else(String::new),
                         };
 

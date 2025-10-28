@@ -100,6 +100,7 @@ mod user_notification;
 pub mod util;
 
 pub use apply_patch::CODEX_APPLY_PATCH_ARG1;
+pub use chat_completions::sanitize_tool_call_arguments;
 pub use command_safety::is_safe_command;
 pub use safety::get_platform_sandbox;
 pub use housekeeping::run_housekeeping_if_due;
