@@ -3717,12 +3717,19 @@ impl ChatWidget<'_> {
         display_text = display_text.replace("\r\n", "\n");
         let mut _lines_tmp: Vec<String> = display_text
             .lines()
-            .map(|l| l.trim_end().to_string())
+            .map(|l| {
+                l.trim_end_matches(|c: char| c.is_ascii_whitespace())
+                    .to_string()
+            })
             .collect();
-        while _lines_tmp.first().map_or(false, |s| s.trim().is_empty()) {
+        while _lines_tmp.first().map_or(false, |s| {
+            s.trim_matches(|c: char| c.is_ascii_whitespace()).is_empty()
+        }) {
             _lines_tmp.remove(0);
         }
-        while _lines_tmp.last().map_or(false, |s| s.trim().is_empty()) {
+        while _lines_tmp.last().map_or(false, |s| {
+            s.trim_matches(|c: char| c.is_ascii_whitespace()).is_empty()
+        }) {
             _lines_tmp.pop();
         }
         display_text = _lines_tmp.join("\n");
